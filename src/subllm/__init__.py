@@ -2,6 +2,7 @@
 from subllm.base import BaseLLM, DryRunLLM
 from subllm.codex import CodexLLM
 from subllm.claude import ClaudeLLM
+from subllm.fallback import FallbackLLM
 from subllm.errors import (
     ClientError,
     OutputError,
@@ -16,6 +17,7 @@ __all__ = [
     "DryRunLLM",
     "CodexLLM",
     "ClaudeLLM",
+    "FallbackLLM",
     "RegionGuard",
     "SubllmError",
     "QuotaError",
