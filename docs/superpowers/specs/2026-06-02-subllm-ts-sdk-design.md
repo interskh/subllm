@@ -33,6 +33,11 @@ both languages share.
   object and validates the result against it — the TS analog of Pydantic's
   `model_validate`. This is why the validator is **ajv** (validates data against
   arbitrary JSON Schema), not zod (which validates against zod schemas).
+  Verified against the real your-app source: its schemas use **lowercase
+  standard JSON Schema** types (`object`/`string`/`array`/`integer` with
+  `enum`/`required`/`properties`) — no uppercase Gemini/OpenAPI dialect, no
+  vendor-only keywords. So ajv (draft-07) compiles and validates them directly;
+  no schema normalization is needed.
 - **your-app will pass model `gpt-5.4-mini`.** The model string is forwarded
   verbatim to `codex exec -m` — never normalized, "corrected," or downgraded.
 - **Phase 1 is `CodexLLM` only.** Both your-app calls (classify-with-search and
@@ -134,9 +139,15 @@ A shared `BaseLLM` shape (interface or abstract class) keeps `CodexLLM` and
 `runCodexExec(prompt, { model, reasoningEffort, search, codexHome, schemaPath, timeoutMs })`:
 
 - argv (no shell), exactly per `drivers-contract.md`:
-  `codex exec -s read-only --skip-git-repo-check --ignore-user-config -o <tmpfile>`
-  `[-m MODEL] [-c model_reasoning_effort="EFFORT"] [-c web_search="live"]`
-  `[--output-schema SCHEMA_FILE] -- PROMPT`
+  `codex exec -s read-only --skip-git-repo-check --ignore-user-config --ephemeral`
+  `-C <clean tmpdir> -o <tmpfile> [-m MODEL] [-c model_reasoning_effort="EFFORT"]`
+  `[-c web_search="live"] [--output-schema SCHEMA_FILE] -- PROMPT`
+- **True context isolation needs `-C <clean temp dir>`**, not just CODEX_HOME:
+  `--ignore-user-config` only skips `$CODEX_HOME/config.toml`; codex still loads
+  a project `AGENTS.md` from its working directory. So each call runs in a fresh
+  empty temp dir (also `cwd`), removed afterward. `--ephemeral` avoids persisting
+  session files. (The Python driver predates this and does not yet pass
+  `-C`/`--ephemeral` — a known gap to backfill; see `docs/drivers-contract.md`.)
 - `CODEX_HOME` set via the child env when `codexHome` is given (otherwise inherit).
 - Model string passed **verbatim**.
 - Run via `execFile` with `timeout: timeoutMs`; on timeout the child is killed →
@@ -166,11 +177,13 @@ collisions on temp files, output files, or auth.
 
 1. Serialize the caller's JSON Schema to a temp file; pass `--output-schema`.
 2. Parse the output file as JSON; require a non-empty object (else `OutputError`).
-3. **Validate with ajv** against the same schema. ajv is configured tolerant
-   (`strict: false`) so Gemini-style schemas (OpenAPI-ish subset, possibly no
-   `$schema`, unknown keywords) validate structurally rather than throwing on
-   unrecognized keywords. On validation failure → `OutputError` (the binding is
-   not trusted blindly — validation is *enforced*, not merely requested).
+3. **Validate with ajv** against the same schema. The SDK accepts **standard
+   JSON Schema**; ajv (`strict: false`) ignores unknown/vendor keywords. A schema
+   ajv cannot compile (e.g. an uppercase-`type` Gemini dialect) is a caller bug,
+   not retryable → `ClientError`. On validation failure of the *output* →
+   `OutputError` (the binding is not trusted blindly — validation is *enforced*,
+   not merely requested). Whether codex's own `--output-schema` accepts a given
+   schema shape is verified by a one-off maintainer live-smoke, not unit tests.
 
 `completeJson(prompt)` appends a JSON-only instruction to the prompt
 (`"\n\nReturn ONLY a single JSON object. No prose, no code fence."`), parses, and

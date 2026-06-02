@@ -310,6 +310,12 @@ describe("retry", () => {
       }, { attempts: 2, baseDelayMs: 0 }),
     ).rejects.toBeInstanceOf(ClientError);
   });
+
+  it("rejects attempts < 1 instead of silently throwing undefined", async () => {
+    await expect(
+      retry(async () => "x", { attempts: 0 }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
 });
 
 describe("schema validation", () => {
@@ -382,6 +388,7 @@ export async function retry<T>(
   opts: RetryOptions = {},
 ): Promise<T> {
   const { attempts = 3, baseDelayMs = 1000, retryOn = DEFAULT_RETRY_ON } = opts;
+  if (attempts < 1) throw new RangeError("retry: attempts must be >= 1");
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
@@ -453,7 +460,7 @@ export class DryRunLLM implements BaseLLM {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npm --prefix ts test`
-Expected: PASS (errors + base = 8 tests total).
+Expected: PASS (errors + base = 9 tests total).
 
 NOTE for reviewers: `import Ajv from "ajv"` relies on `esModuleInterop`. If the installed ajv version requires a different ESM import form (`import { Ajv } from "ajv"`), correct it here — see the "Runtime specifics for codex review" section. The implementer must confirm `npm --prefix ts test` actually passes, not assume the import form.
 
@@ -550,8 +557,61 @@ printf '{"ok":true}' > "$out"
       expect(argv).toContain('web_search="live"');
       expect(argv).not.toContain("--search");
       expect(argv).toContain("--output-schema /tmp/s.json");
+      expect(argv).toContain("-C "); // runs in a clean temp working dir (isolation)
+      expect(argv).toContain("--ephemeral");
     } finally {
       cleanup();
+    }
+  });
+
+  it("passes CODEX_HOME into the child environment", async () => {
+    const homeLog = join(mkdtempSync(join(tmpdir(), "home-")), "home.txt");
+    const cleanup = installFakeCodex(`#!/bin/bash
+printf '%s' "$CODEX_HOME" > "${homeLog}"
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'ok' > "$out"
+`);
+    try {
+      await runCodexExec("x", { codexHome: "/tmp/codex-clean-xyz" });
+      expect(readFileSync(homeLog, "utf8")).toBe("/tmp/codex-clean-xyz");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("places -- immediately before the prompt", async () => {
+    const argvLog = join(mkdtempSync(join(tmpdir(), "dd-")), "dd.txt");
+    const cleanup = installFakeCodex(`#!/bin/bash
+echo "$@" > "${argvLog}"
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'ok' > "$out"
+`);
+    try {
+      await runCodexExec("-leading-dash-prompt");
+      // the prompt follows a literal `--` so a '-'-leading prompt isn't a flag
+      expect(readFileSync(argvLog, "utf8")).toContain("-- -leading-dash-prompt");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("maps rate-limit / quota / too-many-requests messages to QuotaError", async () => {
+    for (const phrase of [
+      "rate limit exceeded",
+      "monthly quota reached",
+      "too many requests",
+    ]) {
+      const cleanup = installFakeCodex(`#!/bin/bash
+echo "${phrase}" >&2
+exit 1
+`);
+      try {
+        await expect(runCodexExec("x")).rejects.toBeInstanceOf(QuotaError);
+      } finally {
+        cleanup();
+      }
     }
   });
 
@@ -621,8 +681,8 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readFile, rm } from "node:fs/promises";
-import { ClientError, QuotaError } from "../errors.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { ClientError, OutputError, QuotaError } from "../errors.js";
 
 const execFileP = promisify(execFile);
 
@@ -656,12 +716,20 @@ export async function runCodexExec(
   } = opts;
 
   const outPath = join(tmpdir(), `subllm-codex-${randomUUID()}.txt`);
+  // A fresh empty working dir so codex cannot load a project AGENTS.md from the
+  // consumer's cwd. --ignore-user-config only skips $CODEX_HOME/config.toml; it
+  // does NOT stop codex reading AGENTS.md from its working directory. -C points
+  // codex at this clean dir; --ephemeral avoids persisting session files.
+  const workDir = await mkdtemp(join(tmpdir(), "subllm-codex-work-"));
   const argv = [
     "exec",
     "-s",
     "read-only",
     "--skip-git-repo-check",
     "--ignore-user-config",
+    "--ephemeral",
+    "-C",
+    workDir,
     "-o",
     outPath,
   ];
@@ -681,6 +749,7 @@ export async function runCodexExec(
     try {
       await execFileP("codex", argv, {
         env,
+        cwd: workDir,
         timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
       });
@@ -704,9 +773,17 @@ export async function runCodexExec(
         `codex exec failed (exit ${String(err.code)}): ${blob.slice(0, 200)}`,
       );
     }
-    return await readFile(outPath, "utf8");
+    try {
+      return await readFile(outPath, "utf8");
+    } catch (e) {
+      // exit 0 but no readable -o file -> treat as empty output (retryable)
+      throw new OutputError(
+        `codex exec produced no readable output file: ${String(e)}`,
+      );
+    }
   } finally {
     await rm(outPath, { force: true });
+    await rm(workDir, { recursive: true, force: true });
   }
 }
 ```
@@ -714,7 +791,7 @@ export async function runCodexExec(
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `npm --prefix ts test`
-Expected: PASS (errors + base + codexExec = 14 tests total).
+Expected: PASS (errors + base + codexExec = 18 tests total).
 
 - [ ] **Step 6: Commit**
 
@@ -737,8 +814,11 @@ git commit -m "feat(ts): codex exec driver (argv contract, error classification,
 `ts/test/codex.test.ts`:
 ```ts
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CodexLLM } from "../src/codex.js";
-import { OutputError } from "../src/errors.js";
+import { ClientError, OutputError } from "../src/errors.js";
 import { installFakeCodex, echoStub } from "./helpers.js";
 
 const SCHEMA = {
@@ -802,6 +882,41 @@ describe("CodexLLM", () => {
     }
   });
 
+  it("rejects an uncompilable schema with ClientError", async () => {
+    const cleanup = installFakeCodex(echoStub('{"topic":"ok"}'));
+    // uppercase 'OBJECT'/'STRING' is the Gemini dialect, not valid JSON Schema;
+    // ajv compile fails -> ClientError (a caller bug, not retried).
+    const badSchema = {
+      type: "OBJECT",
+      properties: { topic: { type: "STRING" } },
+    };
+    try {
+      await expect(
+        new CodexLLM({ attempts: 1 }).completeJsonSchema("x", badSchema),
+      ).rejects.toBeInstanceOf(ClientError);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('emits model_reasoning_effort="medium" by default', async () => {
+    const argvLog = join(mkdtempSync(join(tmpdir(), "eff-")), "eff.txt");
+    const cleanup = installFakeCodex(`#!/bin/bash
+echo "$@" > "${argvLog}"
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'ok' > "$out"
+`);
+    try {
+      await new CodexLLM().complete("x");
+      expect(readFileSync(argvLog, "utf8")).toContain(
+        'model_reasoning_effort="medium"',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("survives >=5 concurrent calls without temp/output-file collisions", async () => {
     // The stub echoes back the prompt (the final argv element, after --). If two
     // concurrent calls shared an output file, results would cross-contaminate.
@@ -844,7 +959,7 @@ import { writeFile, rm } from "node:fs/promises";
 import type { BaseLLM } from "./base.js";
 import { retry, compileSchema, validateWithSchema } from "./base.js";
 import { runCodexExec } from "./drivers/codexExec.js";
-import { OutputError } from "./errors.js";
+import { ClientError, OutputError } from "./errors.js";
 
 const JSON_INSTRUCTION =
   "\n\nReturn ONLY a single JSON object. No prose, no code fence.";
@@ -897,12 +1012,21 @@ export class CodexLLM implements BaseLLM {
     );
   }
 
-  completeJsonSchema(
+  async completeJsonSchema(
     prompt: string,
     jsonSchema: object,
   ): Promise<Record<string, unknown>> {
+    // async so a bad schema rejects the returned promise rather than throwing
+    // synchronously (callers use .catch()/await).
     const validate = compileSchema(jsonSchema); // compile once (bad schema -> ClientError)
-    const schemaJson = JSON.stringify(jsonSchema);
+    let schemaJson: string;
+    try {
+      schemaJson = JSON.stringify(jsonSchema);
+    } catch (e) {
+      throw new ClientError(
+        `invalid JSON schema passed to completeJsonSchema: ${String(e)}`,
+      );
+    }
     return retry(
       async () => {
         // Per-attempt temp schema file with a unique name -> parallel-safe.
@@ -965,7 +1089,7 @@ export {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `npm --prefix ts test`
-Expected: PASS (errors + base + codexExec + codex = 20 tests total).
+Expected: PASS (errors + base + codexExec + codex = 26 tests total).
 
 - [ ] **Step 6: Verify the build still emits a clean dist with types**
 
@@ -1058,25 +1182,73 @@ Build/test: `npm --prefix ts install`, `npm --prefix ts run build`, `npm --prefi
 
 Add a short line near the top of `AGENTS.md` stating the repo now has two implementations: `python/` (authoritative, full feature set) and `ts/` (phase-1 `CodexLLM` SDK for `your-app`), sharing `docs/drivers-contract.md` as the cross-language contract.
 
-- [ ] **Step 4: Verify all README doc links still resolve**
+- [ ] **Step 4: Update the `codex_exec` contract with the isolation recipe**
+
+In `docs/drivers-contract.md`, the `codex_exec` section's Invoke line currently
+reads `codex exec -s read-only --skip-git-repo-check --ignore-user-config -o <tmpfile> ...`.
+Update it to include `--ephemeral -C <clean tmpdir>` and add this note after it:
+
+```markdown
+- ISOLATION: `--ignore-user-config` only skips `$CODEX_HOME/config.toml`; codex
+  still loads a project `AGENTS.md` from its working directory. Run each call in
+  a fresh empty temp dir via `-C <dir>` (also the process `cwd`) so no project
+  context leaks in. `--ephemeral` avoids persisting session files.
+  KNOWN GAP: the Python driver (`python/src/subllm/drivers/codex_exec.py`)
+  predates this and does NOT yet pass `-C`/`--ephemeral`; the TS driver does.
+  Backfill Python to match.
+```
+
+- [ ] **Step 5: Verify all README doc links still resolve**
 
 Run: `grep -oE '\]\(([^)]+\.md)\)' README.md`
 Expected: every referenced `.md` path exists (the `docs/superpowers/...` and `docs/drivers-contract.md` links are unchanged by the restructure).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add README.md AGENTS.md
-git commit -m "docs: document polyglot layout + TypeScript SDK usage"
+git add README.md AGENTS.md docs/drivers-contract.md
+git commit -m "docs: document polyglot layout, TS SDK usage, and -C/--ephemeral isolation"
 ```
+
+---
+
+### Task 8: Acceptance — `file:` consumer smoke test
+
+Verifies the load-bearing `prepare`-builds-`dist` + `file:` + named-ESM-exports
+chain that your-app depends on. No real codex call, no quota spend.
+
+**Files:** none (throwaway temp consumer).
+
+- [ ] **Step 1: Ensure the build is current**
+
+Run: `npm --prefix ts run build`
+Expected: `ts/dist/index.js` + `ts/dist/index.d.ts` present.
+
+- [ ] **Step 2: Install into a throwaway consumer and import the named exports**
+
+```bash
+tmp=$(mktemp -d)
+( cd "$tmp" \
+  && npm init -y >/dev/null \
+  && npm install file:/path/to/subllm/ts >/dev/null 2>&1 \
+  && node --input-type=module -e 'import { CodexLLM, QuotaError } from "subllm"; console.log(typeof CodexLLM, typeof QuotaError)' )
+rm -rf "$tmp"
+```
+Expected: prints `function function` — the consumer resolves `subllm`'s named
+exports from the built `dist/` (so `prepare` ran on install). If it prints an
+error about a missing `dist/index.js` or unresolved export, the `prepare`/`files`
+wiring is wrong — fix `ts/package.json` before declaring done.
+
+- [ ] **Step 3: Verification only — no commit.**
 
 ---
 
 ## Done criteria
 
-- `npm --prefix ts test` → all green (20 tests).
+- `npm --prefix ts test` → all green (26 tests).
 - `npm --prefix ts run build` → clean `dist/` with `.d.ts`.
 - `uv run --directory python pytest -q` → still 46 passed (restructure didn't break Python).
+- Task 8 consumer smoke prints `function function`.
 - A consumer can `import { CodexLLM, QuotaError } from "subllm"` via a `file:` dependency and call `completeJsonSchema(prompt, jsonSchemaObject)` to get a validated object from a real `codex exec` run.
 
 ---
