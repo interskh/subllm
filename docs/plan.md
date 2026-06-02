@@ -297,6 +297,18 @@ class DryRunLLM(BaseLLM):
     def complete_json(self, prompt: str) -> dict[str, Any]:
         self.captured.append(prompt)
         return {}
+
+
+def _validate_with_model(parsed: dict[str, Any], schema_model: type) -> dict[str, Any]:
+    """Validate a parsed dict against a Pydantic model; raise OutputError on
+    mismatch. Shared by CodexLLM and ClaudeLLM so structured output is actually
+    enforced, not merely requested."""
+    from pydantic import ValidationError
+
+    try:
+        return schema_model.model_validate(parsed).model_dump()
+    except ValidationError as e:
+        raise OutputError(f"output failed schema validation: {e}") from e
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -629,7 +641,10 @@ def run_codex_exec(
         if reasoning_effort:
             argv += ["-c", f'model_reasoning_effort="{reasoning_effort}"']
         if search:
-            argv += ["--search"]
+            # NOTE: `--search` is NOT a valid `codex exec` flag in codex-cli
+            # 0.136.0 (verified: `codex exec --search` -> "unexpected argument").
+            # Web search for exec is enabled via config override instead.
+            argv += ["-c", 'web_search="live"']
         if schema_path:
             argv += ["--output-schema", schema_path]
         argv += ["--", prompt]  # -- so a prompt starting with '-' isn't parsed as a flag
@@ -648,11 +663,12 @@ def run_codex_exec(
             raise ClientError(f"codex exec timed out after {timeout_s}s") from e
 
         if proc.returncode != 0:
-            stderr = proc.stderr or ""
-            if _QUOTA_PATTERNS.search(stderr):
-                raise QuotaError(f"codex subscription limit: {stderr.strip()[:200]}")
+            # Inspect stderr AND stdout — codex prints limit notices to either.
+            blob = f"{proc.stderr or ''}\n{proc.stdout or ''}".strip()
+            if _QUOTA_PATTERNS.search(blob):
+                raise QuotaError(f"codex subscription limit: {blob[:200]}")
             raise ClientError(
-                f"codex exec failed (exit {proc.returncode}): {stderr.strip()[:200]}"
+                f"codex exec failed (exit {proc.returncode}): {blob[:200]}"
             )
 
         return Path(out_path).read_text()
@@ -740,6 +756,18 @@ printf '{"topic": "ok"}' > "$out"
     assert llm.complete_json_schema("x", _Summary) == {"topic": "ok"}
 
 
+def test_complete_json_schema_rejects_mismatch(fake_bin, tmp_path):
+    # codex returns a JSON object that does NOT satisfy _Summary (missing 'topic')
+    fake_bin("codex", r'''#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf '{"wrong": "field"}' > "$out"
+''')
+    llm = CodexLLM(model="gpt-5.4", codex_home=str(tmp_path), attempts=1)
+    with pytest.raises(OutputError):
+        llm.complete_json_schema("x", _Summary)
+
+
 def test_region_guard_blocks_before_calling(tmp_path):
     from subllm.preflight import RegionGuard
     guard = RegionGuard(allowed_regions={"US"}, lookup=lambda: "CN", ttl_s=0)
@@ -766,7 +794,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from subllm.base import BaseLLM, _retry
+from subllm.base import BaseLLM, _retry, _validate_with_model
 from subllm.drivers.codex_exec import run_codex_exec
 from subllm.errors import OutputError
 from subllm.preflight import RegionGuard
@@ -823,9 +851,11 @@ class CodexLLM(BaseLLM):
                 f.write(schema)
                 schema_path = f.name
             try:
-                return _parse_json_object(self._run(prompt, schema_path=schema_path))
+                parsed = _parse_json_object(self._run(prompt, schema_path=schema_path))
             finally:
                 Path(schema_path).unlink(missing_ok=True)
+            # Don't trust codex's binding blindly — validate against the model.
+            return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
 
 
@@ -873,7 +903,7 @@ __all__ = [
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_codex_llm.py -v`
-Expected: PASS (5 passed).
+Expected: PASS (6 passed).
 
 - [ ] **Step 6: Run the full suite**
 
@@ -974,8 +1004,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--schema", default=None, help="JSON-schema file (complete-json)")
         p.add_argument("prompt", nargs="?", default=None)
 
-    args = parser.parse_args(argv)
     try:
+        args = parser.parse_args(argv)  # argparse exits(2) on bad args/choices
         client = _build_client(args.client, args)
         prompt = _read_prompt(args.prompt)
         if args.cmd == "complete":
@@ -995,8 +1025,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"error: {e}\n")
         return 1
     except SystemExit as e:
-        sys.stderr.write(f"{e}\n")
-        return 2
+        # argparse (bad args/choices) or _build_client raised SystemExit.
+        return e.code if isinstance(e.code, int) else 2
 
 
 if __name__ == "__main__":
@@ -1035,56 +1065,91 @@ git commit -m "feat: minimal CLI (complete / complete-json)"
 - Create: `src/subllm/drivers/claude_tmux.py`
 - Test: `tests/test_claude_tmux.py`
 
-The driver splits into two units: (a) `extract_final_text(jsonl_lines)` — the
-correctness-critical completion/parse logic, fully unit-tested with fabricated
-transcripts; (b) `run_claude_tmux(...)` — the tmux plumbing that produces those
-lines. Test (a) exhaustively; smoke-test (b) with a fake `tmux`.
+The driver splits into two units: (a) the pure completion/parse logic
+(`extract_final_text` / `_turn_complete`) plus the deterministic-path and
+command-builder helpers — fully unit-tested with fabricated transcripts; (b)
+`run_claude_tmux(...)` — the tmux plumbing, smoke-tested with faithful fake
+`tmux`/`claude` binaries. Test (a) exhaustively.
 
-- [ ] **Step 1: Write the failing test for completion detection**
+This is a faithful port of `ralph_lib/drivers.py`. Key mechanisms that MUST be
+preserved (each was a codex-review finding): pass `--session-id` so the transcript
+filename is deterministic; encode the *resolved* cwd with `re.sub(r"[^A-Za-z0-9-]","-")`;
+pass `CLAUDE_CONFIG_DIR` into the tmux process via `-e`; build the claude command
+as ONE shell string; handle the first-run trust dialog; use `load-buffer`/`paste-buffer`
+for prompts with newlines or >4KB; complete only on an `end_turn` event that
+contains text (not a thinking-only `end_turn`).
+
+- [ ] **Step 1: Write the failing tests for the pure logic**
 
 `tests/test_claude_tmux.py`:
 ```python
 import json
+from pathlib import Path
 import pytest
-from subllm.drivers.claude_tmux import extract_final_text, _turn_complete
+from subllm.drivers.claude_tmux import (
+    extract_final_text, _turn_complete, _project_jsonl_path, _build_claude_cmd,
+)
 from subllm.errors import OutputError
 
 
-def _assistant(text, stop_reason):
-    return json.dumps({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text": text}],
-                    "stop_reason": stop_reason},
-    })
+def _assistant(text=None, stop_reason=None, thinking=False):
+    content = ([{"type": "thinking", "thinking": "hmm"}] if thinking
+               else [{"type": "text", "text": text or ""}])
+    return json.dumps({"type": "assistant",
+                       "message": {"content": content, "stop_reason": stop_reason}})
 
 
 def test_ignores_partial_streaming_lines():
-    lines = [
-        _assistant("partial", None),       # streaming partial -> ignore
-        _assistant("the answer", "end_turn"),
-    ]
+    lines = [_assistant("partial", None), _assistant("the answer", "end_turn")]
     assert extract_final_text(lines) == "the answer"
 
 
-def test_turn_complete_only_on_end_turn():
-    assert _turn_complete([_assistant("x", None)]) is False
-    assert _turn_complete([_assistant("done", "end_turn")]) is True
+def test_thinking_only_end_turn_is_not_complete():
+    # Claude emits a thinking-only end_turn BEFORE the real text response.
+    lines = [_assistant(stop_reason="end_turn", thinking=True)]
+    assert _turn_complete(lines) is False
+    with pytest.raises(OutputError):
+        extract_final_text(lines)
 
 
-def test_concatenates_multiple_text_blocks_in_final_turn():
-    line = json.dumps({
-        "type": "assistant",
-        "message": {"content": [
-            {"type": "text", "text": "part one. "},
-            {"type": "text", "text": "part two."},
-        ], "stop_reason": "end_turn"},
-    })
+def test_picks_text_end_turn_after_thinking_end_turn():
+    lines = [
+        _assistant(stop_reason="end_turn", thinking=True),  # thinking-only -> skip
+        _assistant("real answer", "end_turn"),              # text response -> use
+    ]
+    assert _turn_complete(lines) is True
+    assert extract_final_text(lines) == "real answer"
+
+
+def test_concatenates_multiple_text_blocks():
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "part one. "},
+        {"type": "text", "text": "part two."},
+    ], "stop_reason": "end_turn"}})
     assert extract_final_text([line]) == "part one. part two."
 
 
 def test_no_completed_turn_raises():
     with pytest.raises(OutputError):
         extract_final_text([_assistant("still thinking", None)])
+
+
+def test_project_jsonl_path_encoding(tmp_path):
+    # non-alphanumerics (slashes, dots) -> '-'; filename is <session-id>.jsonl
+    p = _project_jsonl_path(str(tmp_path / "cfg"), "/Users/example/git/x.y", "sess123")
+    assert p.name == "sess123.jsonl"
+    assert p.parent.name == "-Users-example-git-x-y"
+    assert p.parent.parent.name == "projects"
+
+
+def test_build_claude_cmd_is_single_string_with_session_and_disabled_tools():
+    cmd = _build_claude_cmd("sess123", model="claude-x",
+                            permission_mode="bypassPermissions", tools="")
+    assert isinstance(cmd, str)
+    assert "--session-id" in cmd and "sess123" in cmd
+    assert "--permission-mode" in cmd and "bypassPermissions" in cmd
+    assert "--model" in cmd and "claude-x" in cmd
+    assert "--tools ''" in cmd  # tools disabled -> no approval deadlock
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1096,48 +1161,41 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'subllm.drivers.claude_
 
 `src/subllm/drivers/claude_tmux.py`:
 ```python
-"""Drive interactive `claude` inside an ephemeral tmux pane and return the final
-assistant text. Completion is detected by tailing the JSONL session transcript
-for an assistant record with stop_reason == 'end_turn' (NOT by pane scraping).
+"""Drive interactive `claude` in an ephemeral tmux pane and return the final
+assistant text. Completion = tailing the JSONL session transcript (deterministic
+filename via --session-id) for an assistant `end_turn` event that actually
+contains TEXT — not a thinking-only end_turn, not pane scraping.
 
-Adapted from ralph-loop's ralph_lib/drivers.py, minus the bash-watchdog coupling.
-Stdlib only.
+Faithful port of ralph-loop's ralph_lib/drivers.py, minus the bash-watchdog
+stream-json emission. Stdlib only.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
-import uuid
+import uuid as uuid_mod
 from pathlib import Path
 
 from subllm.errors import ClientError, OutputError, QuotaError
 
-_TERMINAL_STOP = {"end_turn"}
+_BANNER_MARKERS = ("❯", "│ >")            # claude TUI input-prompt indicators
+_TRUST_DIALOG_MARKER = "Do you trust the files in this folder"
+_QUOTA_MARKERS = ("usage limit", "rate limit", "out of credit")
+_PASTE_PLACEHOLDER_RE = re.compile(r"\[Pasted text #\d+")
+_ENV_PASSTHROUGH = ("CLAUDE_CONFIG_DIR", "PATH", "HOME", "USER", "LANG", "TERM")
 
 
-def _turn_complete(jsonl_lines: list[str]) -> bool:
-    """True once any assistant record carries a terminal stop_reason."""
-    for line in jsonl_lines:
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("type") != "assistant":
-            continue
-        if rec.get("message", {}).get("stop_reason") in _TERMINAL_STOP:
-            return True
-    return False
+# --- pure completion logic (unit-tested) ------------------------------------
 
-
-def extract_final_text(jsonl_lines: list[str]) -> str:
-    """Return the concatenated text of the last completed assistant turn.
-
-    Only records with a terminal stop_reason count — partial streaming lines
-    (stop_reason null) are ignored. Raises OutputError if no turn completed.
-    """
-    final_text: str | None = None
+def _completed_text(jsonl_lines: list[str]) -> str | None:
+    """Text of the LAST assistant `end_turn` event that contains text blocks, or
+    None. Thinking-only end_turn events and partial streaming lines (stop_reason
+    null) do NOT count — otherwise the turn would 'complete' before the real
+    answer is written."""
+    result: str | None = None
     for line in jsonl_lines:
         try:
             rec = json.loads(line)
@@ -1146,181 +1204,259 @@ def extract_final_text(jsonl_lines: list[str]) -> str:
         if rec.get("type") != "assistant":
             continue
         msg = rec.get("message", {})
-        if msg.get("stop_reason") not in _TERMINAL_STOP:
+        if msg.get("stop_reason") != "end_turn":
             continue
-        parts = [
-            b.get("text", "")
-            for b in msg.get("content", [])
-            if b.get("type") == "text"
-        ]
-        final_text = "".join(parts)
-    if final_text is None:
-        raise OutputError("no completed assistant turn found in transcript")
-    return final_text
+        text = "".join(
+            b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text"
+        )
+        if text:                       # require actual text, not thinking-only
+            result = text
+    return result
 
+
+def _turn_complete(jsonl_lines: list[str]) -> bool:
+    return _completed_text(jsonl_lines) is not None
+
+
+def extract_final_text(jsonl_lines: list[str]) -> str:
+    text = _completed_text(jsonl_lines)
+    if text is None:
+        raise OutputError("no completed text-bearing assistant turn in transcript")
+    return text
+
+
+# --- deterministic transcript path + command builder (unit-tested) ----------
+
+def _project_jsonl_path(config_dir: str, work_dir: str, session_id: str) -> Path:
+    """claude encodes the *resolved* cwd into the project dir name, replacing
+    every non-alphanumeric/non-hyphen char with '-'. With --session-id the
+    filename is exactly <session-id>.jsonl (no fragile newest-file globbing)."""
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(Path(work_dir).resolve()))
+    return Path(config_dir) / "projects" / encoded / f"{session_id}.jsonl"
+
+
+def _q(s: str) -> str:
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _build_claude_cmd(session_id: str, model: str | None, permission_mode: str,
+                      tools: str | None) -> str:
+    """ONE shell-command string for tmux's init command (tmux runs it via sh -c).
+    Passing split argv after the window flags is mis-parsed by tmux."""
+    parts = ["claude",
+             f"--session-id {_q(session_id)}",
+             f"--permission-mode {_q(permission_mode)}"]
+    if model:
+        parts.append(f"--model {_q(model)}")
+    if tools is not None:
+        parts.append(f"--tools {_q(tools)}")   # tools='' disables tools
+    return " ".join(parts)
+
+
+# --- tmux plumbing ----------------------------------------------------------
 
 def _tmux(*args: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(
-            ["tmux", *args], capture_output=True, text=True, timeout=timeout
-        )
+        return subprocess.run(["tmux", *args], capture_output=True, text=True,
+                              timeout=timeout)
     except FileNotFoundError as e:
         raise ClientError("tmux binary not found on PATH") from e
 
 
-def _transcript_dir(config_dir: str, work_dir: str) -> Path:
-    # Claude Code encodes the cwd into the project dir name (slashes -> dashes).
-    encoded = work_dir.replace("/", "-")
-    return Path(config_dir) / "projects" / encoded
+def _capture(session: str) -> str:
+    return _tmux("capture-pane", "-p", "-t", session).stdout
 
 
-def run_claude_tmux(
-    prompt: str,
-    *,
-    model: str | None = None,
-    permission_mode: str = "bypassPermissions",
-    work_dir: str | None = None,
-    config_dir: str | None = None,
-    timeout_s: int = 300,
-    poll_interval_s: float = 1.0,
-) -> str:
+def _quota_banner(pane: str) -> bool:
+    low = pane.lower()
+    return any(s in low for s in _QUOTA_MARKERS)
+
+
+def _env_args(config_dir: str) -> list[str]:
+    """`-e KEY=VAL` pairs so the tmux/claude process writes its transcript where
+    we read it. CLAUDE_CONFIG_DIR is the critical one."""
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = config_dir
+    out: list[str] = []
+    for k in _ENV_PASSTHROUGH:
+        v = env.get(k)
+        if v is not None:
+            out += ["-e", f"{k}={v}"]
+    return out
+
+
+def run_claude_tmux(prompt: str, *, model: str | None = None,
+                    permission_mode: str = "bypassPermissions",
+                    tools: str | None = "", work_dir: str | None = None,
+                    config_dir: str | None = None, timeout_s: int = 300,
+                    poll_interval_s: float = 1.0) -> str:
     """Run one interactive claude turn via tmux; return final assistant text.
-
-    Raises ClientError (tmux/spawn failure, timeout), QuotaError (limit banner),
-    OutputError (no completed turn).
-    """
+    tools='' (default) disables tools so an unattended turn never deadlocks on a
+    tool-approval prompt. Raises QuotaError / ClientError / OutputError."""
     work_dir = work_dir or os.getcwd()
     config_dir = config_dir or os.environ.get(
         "CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")
     )
-    session = f"subllm-{uuid.uuid4().hex[:8]}"
-    tdir = _transcript_dir(config_dir, work_dir)
-    before = set(tdir.glob("*.jsonl")) if tdir.exists() else set()
+    session_id = str(uuid_mod.uuid4())
+    session = f"subllm-{session_id[:8]}"
+    jsonl_path = _project_jsonl_path(config_dir, work_dir, session_id)
+    claude_cmd = _build_claude_cmd(session_id, model, permission_mode, tools)
 
-    argv = ["claude", "--permission-mode", permission_mode]
-    if model:
-        argv += ["--model", model]
-
-    # ephemeral detached session running interactive claude
-    res = _tmux(
-        "new-session", "-d", "-s", session, "-x", "200", "-y", "50",
-        "-c", work_dir, *argv,
-    )
+    res = _tmux("new-session", "-d", "-s", session, "-x", "200", "-y", "50",
+                "-c", work_dir, *_env_args(config_dir), claude_cmd)
     if res.returncode != 0:
         raise ClientError(f"tmux new-session failed: {res.stderr.strip()[:200]}")
-
     try:
-        _wait_for_ready(session, timeout_s=30)
-        # send the prompt literally, then Enter as a separate key event
-        _tmux("send-keys", "-t", session, "-l", prompt)
-        _tmux("send-keys", "-t", session, "Enter")
-
-        transcript = _await_completion(
-            tdir, before, timeout_s=timeout_s, poll_interval_s=poll_interval_s,
-            session=session,
-        )
-        return extract_final_text(transcript)
+        _wait_for_banner(session, timeout_s=30)
+        _send_prompt(session, prompt)
+        return extract_final_text(_await_completion(
+            session, jsonl_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+        ))
     finally:
-        _tmux("kill-session", "-t", session)
+        _tmux("kill-session", "-t", session, timeout=3)
 
 
-def _wait_for_ready(session: str, timeout_s: float) -> None:
-    """Wait until the claude TUI prompt is rendered before sending input."""
+def _wait_for_banner(session: str, timeout_s: float) -> None:
+    """Poll until the input prompt appears. On first run in a project the TUI
+    shows a workspace-trust dialog first; accept it (send '1' + Enter) and keep
+    polling — its own selection marker would otherwise be mistaken for the
+    prompt."""
     deadline = time.monotonic() + timeout_s
+    trust_handled = False
     while time.monotonic() < deadline:
-        pane = _tmux("capture-pane", "-p", "-t", session).stdout
+        pane = _capture(session)
         if _quota_banner(pane):
             raise QuotaError(f"claude limit banner: {pane.strip()[:200]}")
-        if pane.strip():  # something rendered
+        if not trust_handled and _TRUST_DIALOG_MARKER in pane:
+            _tmux("send-keys", "-t", session, "1")
+            time.sleep(0.2)
+            _tmux("send-keys", "-t", session, "Enter")
+            trust_handled = True
+            time.sleep(1.0)
+            continue
+        if _TRUST_DIALOG_MARKER not in pane and any(m in pane for m in _BANNER_MARKERS):
             return
         time.sleep(0.5)
-    raise ClientError("claude TUI did not become ready in time")
+    raise ClientError("claude TUI prompt did not appear in time")
 
 
-def _await_completion(
-    tdir: Path, before: set, *, timeout_s: int, poll_interval_s: float, session: str
-) -> list[str]:
-    """Poll the (new) transcript file until a turn completes or we time out."""
+def _send_prompt(session: str, prompt: str) -> None:
+    """send-keys -l for small single-line prompts; load-buffer + paste-buffer for
+    multiline or >4KB (summaries routinely exceed 4KB). After a paste, wait for
+    the bracketed-paste placeholder before Enter to avoid a dropped submit."""
+    if "\n" in prompt or len(prompt.encode("utf-8")) > 4096:
+        buf = f"subllm-{uuid_mod.uuid4().hex[:8]}"
+        subprocess.run(["tmux", "load-buffer", "-b", buf, "-"], input=prompt,
+                       text=True, check=True, timeout=5)
+        _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", session)
+        _wait_for_paste_placeholder(session)
+    else:
+        _tmux("send-keys", "-t", session, "-l", prompt)
+        time.sleep(0.3)
+    _tmux("send-keys", "-t", session, "Enter")
+
+
+def _wait_for_paste_placeholder(session: str, timeout_s: float = 5.0) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        current = set(tdir.glob("*.jsonl")) if tdir.exists() else set()
-        new_files = current - before
-        target = max(new_files, key=lambda p: p.stat().st_mtime) if new_files else None
-        if target is not None:
-            lines = target.read_text(errors="replace").splitlines()
+        if _PASTE_PLACEHOLDER_RE.search(_capture(session)):
+            return
+        time.sleep(0.1)
+    # don't raise: pressing Enter anyway is cheaper than a full retry
+
+
+def _await_completion(session: str, jsonl_path: Path, *, timeout_s: int,
+                      poll_interval_s: float) -> list[str]:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if jsonl_path.exists():
+            lines = jsonl_path.read_text(errors="replace").splitlines()
             if _turn_complete(lines):
                 return lines
-        pane = _tmux("capture-pane", "-p", "-t", session).stdout
-        if _quota_banner(pane):
-            raise QuotaError(f"claude limit banner: {pane.strip()[:200]}")
+        if _quota_banner(_capture(session)):
+            raise QuotaError("claude limit banner during generation")
         time.sleep(poll_interval_s)
     raise ClientError(f"claude turn did not complete within {timeout_s}s")
-
-
-def _quota_banner(pane_text: str) -> bool:
-    low = pane_text.lower()
-    return any(s in low for s in ("usage limit", "rate limit", "out of credit"))
 ```
 
-- [ ] **Step 4: Run completion-detection tests to verify they pass**
+- [ ] **Step 4: Run the pure-logic tests to verify they pass**
 
 Run: `uv run pytest tests/test_claude_tmux.py -v`
-Expected: PASS (4 passed). (Plumbing functions are covered by the smoke test in
-Step 5.)
+Expected: PASS (7 passed). (Plumbing is covered by the smoke test in Step 5.)
 
-- [ ] **Step 5: Add a tmux-plumbing smoke test**
+- [ ] **Step 5: Add a faithful tmux-plumbing smoke test**
+
+The fakes are Python (not bash) so they parse the real argv, honor `-e
+CLAUDE_CONFIG_DIR`, assert the claude command is a SINGLE trailing string, and
+write the transcript using the SAME path encoding + `--session-id` the driver
+expects. A wrong command shape, missing env, or wrong path makes the test fail.
 
 Append to `tests/test_claude_tmux.py`:
 ```python
-def test_run_claude_tmux_happy_path(fake_bin, tmp_path, monkeypatch):
-    # Fake claude: write a completed transcript into the encoded project dir.
+_FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import os, re, sys, json
+from pathlib import Path
+args = sys.argv[1:]
+sid = ""
+for i, a in enumerate(args):
+    if a == "--session-id" and i + 1 < len(args):
+        sid = args[i + 1]
+cfg = os.environ["CLAUDE_CONFIG_DIR"]            # KeyError if -e didn't pass it
+encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(Path.cwd().resolve()))
+d = Path(cfg) / "projects" / encoded
+d.mkdir(parents=True, exist_ok=True)
+rec = {"type": "assistant",
+       "message": {"content": [{"type": "text", "text": "tmux answer"}],
+                   "stop_reason": "end_turn"}}
+(d / (sid + ".jsonl")).write_text(json.dumps(rec) + "\n")
+'''
+
+_FAKE_TMUX = r'''#!/usr/bin/env python3
+import os, sys, subprocess
+a = sys.argv[1:]
+sub = a[0] if a else ""
+if sub == "new-session":
+    rest, workdir, env = a[1:], None, dict(os.environ)
+    i = 0
+    while i < len(rest):
+        if rest[i] == "-c" and i + 1 < len(rest):
+            workdir = rest[i + 1]; i += 2; continue
+        if rest[i] == "-e" and i + 1 < len(rest):
+            k, _, v = rest[i + 1].partition("="); env[k] = v; i += 2; continue
+        i += 1
+    shell_cmd = rest[-1]
+    assert "claude" in shell_cmd, "expected ONE claude command string, got: " + repr(shell_cmd)
+    assert "CLAUDE_CONFIG_DIR" in env, "CLAUDE_CONFIG_DIR was not passed via -e"
+    subprocess.Popen(["sh", "-c", shell_cmd], cwd=workdir, env=env)
+    sys.exit(0)
+if sub == "capture-pane":
+    sys.stdout.write("❯ ")   # banner marker so _wait_for_banner proceeds
+    sys.exit(0)
+sys.exit(0)   # send-keys / load-buffer / paste-buffer / kill-session -> no-op
+'''
+
+
+def test_run_claude_tmux_happy_path(fake_bin, tmp_path):
     config_dir = tmp_path / "cfg"
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    encoded = str(work_dir).replace("/", "-")
-    proj = config_dir / "projects" / encoded
-    proj.mkdir(parents=True)
-    transcript = proj / "sess.jsonl"
-    rec = json.dumps({
-        "type": "assistant",
-        "message": {"content": [{"type": "text", "text": "tmux answer"}],
-                    "stop_reason": "end_turn"},
-    })
-    # claude stub: render something to the pane, then drop a transcript line.
-    fake_bin("claude", f'''#!/bin/bash
-echo "ready prompt"
-printf '%s\\n' '{rec}' > "{transcript}"
-sleep 0.2
-''')
-    # fake tmux: run the claude argv in-process so the transcript appears.
-    fake_bin("tmux", r'''#!/bin/bash
-cmd="$1"; shift
-case "$cmd" in
-  new-session)
-    # find the program after the last option; just exec claude
-    claude >/dev/null 2>&1 &
-    ;;
-  capture-pane) echo "ready prompt" ;;
-  send-keys|kill-session) : ;;
-esac
-exit 0
-''')
+    fake_bin("claude", _FAKE_CLAUDE)
+    fake_bin("tmux", _FAKE_TMUX)
     from subllm.drivers.claude_tmux import run_claude_tmux
-    out = run_claude_tmux(
-        "summarize", work_dir=str(work_dir), config_dir=str(config_dir),
-        timeout_s=10, poll_interval_s=0.1,
-    )
+    out = run_claude_tmux("summarize", work_dir=str(work_dir),
+                          config_dir=str(config_dir), timeout_s=10,
+                          poll_interval_s=0.1)
     assert out == "tmux answer"
 ```
 
 Run: `uv run pytest tests/test_claude_tmux.py -v`
-Expected: PASS (5 passed).
+Expected: PASS (8 passed).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/subllm/drivers/claude_tmux.py tests/test_claude_tmux.py
-git commit -m "feat: claude tmux driver with JSONL completion detection"
+git commit -m "feat: claude tmux driver (faithful ralph port, deterministic transcript)"
 ```
 
 ---
@@ -1338,8 +1474,13 @@ git commit -m "feat: claude tmux driver with JSONL completion detection"
 ```python
 import json
 import pytest
+from pydantic import BaseModel
 from subllm.claude import ClaudeLLM
 from subllm.errors import OutputError
+
+
+class _Summary(BaseModel):
+    topic: str
 
 
 def _patch_driver(monkeypatch, returns):
@@ -1357,10 +1498,28 @@ def test_complete_json_extracts_object_from_fenced_output(monkeypatch):
     assert ClaudeLLM().complete_json("x") == {"k": 1}
 
 
+def test_complete_json_handles_prose_braces_before_object(monkeypatch):
+    # A greedy \{.*\} would mis-grab from the first brace in prose. raw_decode
+    # scans candidate '{' positions and returns the first VALID object.
+    _patch_driver(monkeypatch, 'note: use {curly} carefully. Here: {"k": 2} done')
+    assert ClaudeLLM().complete_json("x") == {"k": 2}
+
+
 def test_complete_json_raises_when_no_object(monkeypatch):
     _patch_driver(monkeypatch, "no json here")
     with pytest.raises(OutputError):
         ClaudeLLM(attempts=1).complete_json("x")
+
+
+def test_complete_json_schema_validates(monkeypatch):
+    _patch_driver(monkeypatch, '```json\n{"topic": "weekend"}\n```')
+    assert ClaudeLLM().complete_json_schema("x", _Summary) == {"topic": "weekend"}
+
+
+def test_complete_json_schema_rejects_mismatch(monkeypatch):
+    _patch_driver(monkeypatch, '{"wrong": "field"}')
+    with pytest.raises(OutputError):
+        ClaudeLLM(attempts=1).complete_json_schema("x", _Summary)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1382,14 +1541,12 @@ import json
 import re
 from typing import Any
 
-from subllm.base import BaseLLM, _retry
+from subllm.base import BaseLLM, _retry, _validate_with_model
 from subllm.drivers.claude_tmux import run_claude_tmux
 from subllm.errors import OutputError
 from subllm.preflight import RegionGuard
 
 _JSON_INSTRUCTION = "\n\nReturn ONLY a single JSON object — no prose, no code fence."
-# Grab the first {...} block, tolerating ```json fences and surrounding prose.
-_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class ClaudeLLM(BaseLLM):
@@ -1425,18 +1582,40 @@ class ClaudeLLM(BaseLLM):
             return _extract_json_object(self._run(prompt + _JSON_INSTRUCTION))
         return _retry(_call, attempts=self._attempts)
 
+    def complete_json_schema(self, prompt: str, schema_model: type) -> dict[str, Any]:
+        # Claude has no native schema binding — instruct + parse + validate.
+        instruction = (
+            _JSON_INSTRUCTION
+            + " Match this JSON schema: "
+            + json.dumps(schema_model.model_json_schema())
+        )
+        def _call() -> dict[str, Any]:
+            parsed = _extract_json_object(self._run(prompt + instruction))
+            return _validate_with_model(parsed, schema_model)
+        return _retry(_call, attempts=self._attempts)
+
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
-    match = _OBJECT_RE.search(raw or "")
-    if not match:
-        raise OutputError(f"no JSON object in claude output: {raw[:120]!r}")
-    try:
-        parsed = json.loads(match.group(0))
-    except json.JSONDecodeError as e:
-        raise OutputError(f"claude returned invalid JSON: {raw[:120]!r}") from e
-    if not isinstance(parsed, dict) or not parsed:
-        raise OutputError("expected non-empty JSON object")
-    return parsed
+    """Extract the first VALID top-level JSON object. Strips ```json fences, then
+    scans each '{' with json.JSONDecoder().raw_decode — robust against prose
+    braces and trailing text (a greedy \\{.*\\} regex would mis-grab both)."""
+    text = (raw or "").strip()
+    if "```" in text:
+        # keep the content of the first fenced block if present
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and parsed:
+            return parsed
+    raise OutputError(f"no JSON object in claude output: {raw[:120]!r}")
 ```
 
 - [ ] **Step 4: Add ClaudeLLM to exports**
@@ -1447,13 +1626,13 @@ Edit `src/subllm/__init__.py`: add `from subllm.claude import ClaudeLLM` after t
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_claude_llm.py -v`
-Expected: PASS (3 passed).
+Expected: PASS (6 passed).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/subllm/claude.py src/subllm/__init__.py tests/test_claude_llm.py
-git commit -m "feat: ClaudeLLM client"
+git commit -m "feat: ClaudeLLM client (schema override + robust JSON extraction)"
 ```
 
 ---
@@ -1625,31 +1804,49 @@ fallback, region guard) is trivial to re-express in any language.
 ## codex_exec
 
 - Invoke: `codex exec -s read-only --skip-git-repo-check --ignore-user-config
-  -o <tmpfile> [-m MODEL] [-c model_reasoning_effort="EFFORT"] [--search]
-  [--output-schema FILE] -- PROMPT`
+  -o <tmpfile> [-m MODEL] [-c model_reasoning_effort="EFFORT"]
+  [-c web_search="live"] [--output-schema FILE] -- PROMPT`
+- NOTE: `--search` is NOT a valid `codex exec` flag (verified on codex-cli
+  0.136.0: "unexpected argument '--search'"). Enable web search for exec via the
+  config override `-c web_search="live"` instead.
 - Auth: ChatGPT subscription login (no API key). Set `CODEX_HOME` to an isolated
   dir containing only `auth.json` to avoid AGENTS.md context pollution.
+  `--ignore-user-config` still reads auth from `CODEX_HOME`.
 - Output: the final message is written to `<tmpfile>` (the `-o` path); read it.
-- Errors: non-zero exit with stderr matching /usage limit|rate.?limit|quota|
-  too many requests|try again later/i  => QuotaError; missing binary / other
+- Errors: non-zero exit with stderr+stdout matching /usage limit|rate.?limit|
+  quota|too many requests|try again later/i => QuotaError; missing binary / other
   non-zero exit / timeout => ClientError.
 
 ## claude_tmux
 
-- Spawn interactive `claude --permission-mode bypassPermissions [--model M]`
-  in an ephemeral tmux session (`tmux new-session -d -s <name> -c <workdir> ...`).
+- Build the claude command as ONE shell string (tmux runs it via `sh -c`; split
+  trailing argv after the window flags is mis-parsed):
+  `claude --session-id <uuid> --permission-mode bypassPermissions [--model M] --tools ''`.
+  `--tools ''` disables tools so an unattended turn never deadlocks on approval.
+- Spawn: `tmux new-session -d -s <name> -x 200 -y 50 -c <workdir>
+  -e CLAUDE_CONFIG_DIR=<cfg> [-e PATH=… -e HOME=… …] '<claude-cmd>'`.
+  Passing `CLAUDE_CONFIG_DIR` via `-e` is REQUIRED — otherwise claude writes its
+  transcript somewhere the reader doesn't look and the turn times out.
 - Auth: regular Claude subscription (interactive path — NOT `claude -p`, which
   after 2026-06-15 bills a separate programmatic credit).
-- Send prompt: `tmux send-keys -t <name> -l "<prompt>"` then a separate
-  `tmux send-keys -t <name> Enter`.
-- Detect completion: tail the newest JSONL under
-  `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<cwd-with-slashes-as-dashes>/*.jsonl`.
-  A turn is complete when an `{"type":"assistant", ...}` record has
-  `message.stop_reason == "end_turn"`. IGNORE partial streaming lines
-  (stop_reason null). Final text = concatenation of that record's text blocks.
+- Readiness: poll `capture-pane` for the input-prompt markers (`❯`, `│ >`). On
+  first run in a project a workspace-trust dialog ("Do you trust the files in
+  this folder") appears first — accept it (send `1`, then `Enter`) and keep
+  polling.
+- Send prompt: for single-line ≤4KB, `send-keys -t <name> -l "<prompt>"` then a
+  separate `send-keys -t <name> Enter`. For multiline or >4KB, `load-buffer` +
+  `paste-buffer`, wait for the `[Pasted text #N]` placeholder, then `Enter`.
+- Detect completion: read the DETERMINISTIC transcript
+  `<cfg>/projects/<encoded>/<uuid>.jsonl`, where
+  `encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(Path(workdir).resolve()))` and
+  `<uuid>` is the `--session-id`. A turn is complete when an
+  `{"type":"assistant"}` record has `message.stop_reason == "end_turn"` AND
+  contains a text content block. IGNORE partial streaming lines (stop_reason
+  null) and thinking-only `end_turn` events. Final text = concatenation of that
+  record's text blocks.
 - Always `tmux kill-session -t <name>` in a finally block.
 - Errors: limit banner in pane => QuotaError; tmux/spawn failure/timeout =>
-  ClientError; no completed turn => OutputError.
+  ClientError; no completed text turn => OutputError.
 ```
 
 - [ ] **Step 2: Commit**
