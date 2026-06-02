@@ -121,3 +121,34 @@ def test_run_claude_tmux_happy_path(fake_bin, tmp_path):
                           config_dir=str(config_dir), timeout_s=10,
                           poll_interval_s=0.1)
     assert out == "tmux answer"
+
+
+def test_tmux_timeout_maps_to_client_error(monkeypatch):
+    # A wedged tmux call must surface as ClientError, not a raw TimeoutExpired
+    # that breaks the driver's documented QuotaError/ClientError/OutputError API.
+    import subprocess as sp
+    from subllm.drivers import claude_tmux as mod
+    from subllm.errors import ClientError
+
+    def slow(*a, **k):
+        raise sp.TimeoutExpired(cmd="tmux", timeout=1)
+
+    monkeypatch.setattr(mod.subprocess, "run", slow)
+    with pytest.raises(ClientError):
+        mod._tmux("capture-pane", "-t", "sess")
+
+
+def test_send_prompt_load_buffer_failure_maps_to_client_error(monkeypatch):
+    # The load-buffer path (multiline / >4KB prompts) used a bare subprocess.run;
+    # a non-zero exit must map to ClientError, not leak CalledProcessError.
+    import subprocess as sp
+    from subllm.drivers import claude_tmux as mod
+    from subllm.errors import ClientError
+
+    def boom(*a, **k):
+        raise sp.CalledProcessError(1, "tmux load-buffer")
+
+    monkeypatch.setattr(mod.subprocess, "run", boom)
+    multiline = "line1\nline2\n"  # forces the load-buffer branch
+    with pytest.raises(ClientError):
+        mod._send_prompt("sess", multiline)

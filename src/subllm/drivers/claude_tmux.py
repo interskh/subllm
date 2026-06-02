@@ -98,6 +98,8 @@ def _tmux(*args: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
                               timeout=timeout)
     except FileNotFoundError as e:
         raise ClientError("tmux binary not found on PATH") from e
+    except subprocess.TimeoutExpired as e:
+        raise ClientError(f"tmux command timed out: {' '.join(args)}") from e
 
 
 def _capture(session: str) -> str:
@@ -150,7 +152,10 @@ def run_claude_tmux(prompt: str, *, model: str | None = None,
             session, jsonl_path, timeout_s=timeout_s, poll_interval_s=poll_interval_s
         ))
     finally:
-        _tmux("kill-session", "-t", session, timeout=3)
+        try:
+            _tmux("kill-session", "-t", session, timeout=3)
+        except ClientError:
+            pass  # cleanup failure must never mask the turn's real result/error
 
 
 def _wait_for_banner(session: str, timeout_s: float) -> None:
@@ -183,8 +188,11 @@ def _send_prompt(session: str, prompt: str) -> None:
     the bracketed-paste placeholder before Enter to avoid a dropped submit."""
     if "\n" in prompt or len(prompt.encode("utf-8")) > 4096:
         buf = f"subllm-{uuid_mod.uuid4().hex[:8]}"
-        subprocess.run(["tmux", "load-buffer", "-b", buf, "-"], input=prompt,
-                       text=True, check=True, timeout=5)
+        try:
+            subprocess.run(["tmux", "load-buffer", "-b", buf, "-"], input=prompt,
+                           text=True, check=True, timeout=5)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            raise ClientError(f"tmux load-buffer failed: {e}") from e
         _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", session)
         _wait_for_paste_placeholder(session)
     else:
