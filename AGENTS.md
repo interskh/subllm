@@ -7,8 +7,8 @@ tmux. No per-token API. No proxy.
 
 ## Read first (in order)
 
-1. `docs/design.md` — the approved design spec. This is authoritative.
-2. `docs/plan.md` — the ordered implementation plan. Execute it step by step.
+1. `docs/superpowers/specs/2026-06-02-subllm-v1-design.md` — the approved design spec. This is authoritative.
+2. `docs/superpowers/plans/2026-06-02-subllm-v1.md` — the ordered implementation plan. Execute it step by step.
 3. `docs/research/research_subscription-summarization_2026-06-02.md` — background,
    sourcing, and the gotchas (codex context pollution; claude 2026-06-15 billing
    split; JSONL completion detection).
@@ -19,7 +19,7 @@ Client-native execution only. NEVER build or use a subscription-to-API HTTP prox
 (token wrapped behind an OpenAI-compatible endpoint) — ban risk. subllm only
 drives the real official CLIs as subprocesses.
 
-## Build order (see docs/plan.md for detail)
+## Build order (see docs/superpowers/plans/2026-06-02-subllm-v1.md for detail)
 
 1. `base.py`, `errors.py`, `preflight.py` (RegionGuard), `DryRunLLM`, pyproject/uv, tests scaffold
 2. `CodexLLM` end-to-end (ship first)

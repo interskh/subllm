@@ -5,7 +5,7 @@ local tools: `codex-cli 0.136.0`, `Claude Code 2.1.160`, real `~/.claude/project
 paths, and ralph's live driver `~/Projects/ralph-loop/ralph_lib/drivers.py`.
 
 Verdict (original): **Not executable as written.** All findings below were applied
-to `docs/plan.md` (commit following this file).
+to `docs/superpowers/plans/2026-06-02-subllm-v1.md` (commit following this file).
 
 ## CRITICAL — applied
 
