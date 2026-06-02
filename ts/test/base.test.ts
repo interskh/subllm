@@ -44,6 +44,20 @@ describe("retry", () => {
       retry(async () => "x", { attempts: 0 }),
     ).rejects.toBeInstanceOf(RangeError);
   });
+
+  it("never retries QuotaError even when retryOn explicitly includes it", async () => {
+    let n = 0;
+    await expect(
+      retry(
+        async () => {
+          n++;
+          throw new QuotaError("cap");
+        },
+        { attempts: 3, baseDelayMs: 0, retryOn: [QuotaError] },
+      ),
+    ).rejects.toBeInstanceOf(QuotaError);
+    expect(n).toBe(1);
+  });
 });
 
 describe("schema validation", () => {
