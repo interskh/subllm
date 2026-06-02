@@ -1,5 +1,10 @@
 # subllm — agent handoff
 
+**Polyglot repo:** `python/` is the authoritative full-featured implementation
+(CodexLLM + ClaudeLLM + FallbackLLM + CLI); `ts/` is a phase-1 `CodexLLM` SDK
+targeted at `your-app`. Both share `docs/drivers-contract.md` as the
+cross-language subprocess contract.
+
 You are implementing **subllm**: a Python library that runs LLM requests
 (summarize / search-and-summarize) through flat-rate coding subscriptions via the
 **genuine official clients** — `codex exec` and interactive `claude` driven over

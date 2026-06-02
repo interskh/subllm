@@ -1,0 +1,29 @@
+{
+  "name": "subllm",
+  "version": "0.1.0",
+  "description": "Drive codex exec from TypeScript on flat-rate ChatGPT-subscription quota (client-native, no proxy).",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^20.16.0"
+  }
+}

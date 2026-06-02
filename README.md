@@ -33,23 +33,36 @@ passing, codex path verified end-to-end against a live subscription.
 
 ```
 subllm/
-  src/subllm/
-    __init__.py          # public exports (the 11 names below)
-    base.py              # BaseLLM ABC + transient _retry + DryRunLLM
-    errors.py            # SubllmError / QuotaError / ClientError / OutputError / RegionError
-    preflight.py         # RegionGuard (optional region/IP check)
-    codex.py             # CodexLLM  (primary)
-    claude.py            # ClaudeLLM (fallback)
-    fallback.py          # FallbackLLM(primary, *fallbacks, on=(QuotaError,))
-    cli.py               # minimal CLI: subllm complete / complete-json
-    drivers/             # the isolated subprocess boundary (TS/Go portability seam)
-      codex_exec.py      # contract for `codex exec`
-      claude_tmux.py     # tmux driver for interactive `claude`
-  docs/
+  python/                # Python library (CodexLLM + ClaudeLLM + FallbackLLM + CLI)
+    src/subllm/
+      __init__.py          # public exports (the 11 names below)
+      base.py              # BaseLLM ABC + transient _retry + DryRunLLM
+      errors.py            # SubllmError / QuotaError / ClientError / OutputError / RegionError
+      preflight.py         # RegionGuard (optional region/IP check)
+      codex.py             # CodexLLM  (primary)
+      claude.py            # ClaudeLLM (fallback)
+      fallback.py          # FallbackLLM(primary, *fallbacks, on=(QuotaError,))
+      cli.py               # minimal CLI: subllm complete / complete-json
+      drivers/
+        codex_exec.py      # contract for `codex exec`
+        claude_tmux.py     # tmux driver for interactive `claude`
+    tests/
+    pyproject.toml
+  ts/                    # TypeScript SDK (CodexLLM, phase 1)
+    src/
+      index.ts           # public exports
+      base.ts            # BaseLLM + retry + ajv validation + DryRunLLM
+      errors.ts          # SubllmError / QuotaError / ClientError / OutputError
+      codex.ts           # CodexLLM
+      drivers/codexExec.ts  # the isolated `codex exec` subprocess boundary
+    test/
+    package.json
+  docs/                  # shared: spec, plans, research, drivers-contract.md
     superpowers/specs/   # design spec (PRD)
     superpowers/plans/   # implementation plan
     research/            # background research + sourcing
-    drivers-contract.md  # subprocess contract for future TS/Go ports
+    drivers-contract.md  # subprocess contract (cross-language)
+  README.md
 ```
 
 ## Requirements
@@ -66,7 +79,7 @@ subllm/
 
 ```bash
 # from the consuming project
-uv add /path/to/subllm
+uv add /path/to/subllm/python
 ```
 
 or pin it as a path source in the consumer's `pyproject.toml`:
@@ -76,10 +89,10 @@ or pin it as a path source in the consumer's `pyproject.toml`:
 dependencies = ["subllm"]
 
 [tool.uv.sources]
-subllm = { path = "/path/to/subllm" }
+subllm = { path = "/path/to/subllm/python" }
 ```
 
-Editable install also works: `uv pip install -e /path/to/subllm`.
+Editable install also works: `uv pip install -e /path/to/subllm/python`.
 
 ## Quickstart
 
@@ -195,6 +208,61 @@ stderr with a non-zero exit code. Example:
 ```bash
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
+
+## TypeScript SDK (`ts/`)
+
+A Node ESM SDK that drives `codex exec` with the same capabilities as the Python
+`CodexLLM`. Phase 1 ships `CodexLLM` + `DryRunLLM` only.
+
+Consume it as a local path dependency (mirrors the Python `uv add /path` model):
+
+```jsonc
+// your-app/package.json
+{
+  "dependencies": {
+    "subllm": "file:/path/to/subllm/ts"
+  }
+}
+```
+
+```ts
+import { CodexLLM, QuotaError } from "subllm";
+
+const llm = new CodexLLM({
+  model: "gpt-5.4-mini",   // forwarded verbatim to `codex exec -m`
+  search: true,            // -c web_search="live"
+  codexHome: "/tmp/codex-clean",
+});
+
+// classify a topic, structured against a plain JSON Schema object:
+const classified = await llm.completeJsonSchema(prompt, CLASSIFIER_SCHEMA);
+```
+
+- `completeJsonSchema(prompt, jsonSchema)` accepts a **plain JSON Schema object**,
+  binds it to codex via `--output-schema`, and returns a parsed object that is
+  **validated with ajv** (throws `OutputError` on mismatch). This is the reliable
+  path for structured output.
+- `completeJson(prompt)` is best-effort: it prompt-instructs a bare JSON object and
+  parses codex's final message directly (no code-fence stripping), retrying on
+  unparseable output. For schema-guaranteed results, prefer `completeJsonSchema`.
+- Errors mirror the Python hierarchy: `QuotaError` (not retried), `ClientError`,
+  `OutputError`, all under `SubllmError`.
+- Concurrent calls are safe (each uses its own temp output/schema file).
+
+### Build & consume
+
+```sh
+npm --prefix ts install      # installs deps AND builds dist/ (prepare runs tsc)
+npm --prefix ts run build    # rebuild dist/ after changes
+npm --prefix ts test         # run the vitest suite
+```
+
+> **Prerequisite for `file:` consumers:** the `file:` dependency relies on `subllm/ts`
+> having its dev deps installed so the `prepare` script (`tsc`) can build `dist/` at
+> install time. Run `npm --prefix ts install` in this repo once before a consumer
+> (e.g. your-app) runs `npm install`. (npm runs `prepare` for a `file:`/directory
+> dep but does not install that dep's devDependencies first, so `tsc` must already
+> be present in `ts/node_modules`.)
 
 ## API reference
 

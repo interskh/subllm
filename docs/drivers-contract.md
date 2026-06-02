@@ -7,11 +7,22 @@ fallback, region guard) is trivial to re-express in any language.
 ## codex_exec
 
 - Invoke: `codex exec -s read-only --skip-git-repo-check --ignore-user-config
+  --ephemeral -C <clean tmpdir>
   -o <tmpfile> [-m MODEL] [-c model_reasoning_effort="EFFORT"]
   [-c web_search="live"] [--output-schema FILE] -- PROMPT`
 - NOTE: `--search` is NOT a valid `codex exec` flag (verified on codex-cli
   0.136.0: "unexpected argument '--search'"). Enable web search for exec via the
   config override `-c web_search="live"` instead.
+- ISOLATION: `--ignore-user-config` only skips `$CODEX_HOME/config.toml`; codex
+  still loads a project `AGENTS.md` from its working directory. Run each call in
+  a fresh empty temp dir via `-C <dir>` (also the process `cwd`) so no project
+  context leaks in. `--ephemeral` avoids persisting session files.
+  KNOWN GAP: the Python driver (`python/src/subllm/drivers/codex_exec.py`)
+  predates this and does NOT yet pass `-C`/`--ephemeral`; the TS driver does.
+  Backfill Python to match.
+- STDIN: `codex exec` reads stdin even with an argv prompt — the driver must
+  close the child's stdin (or it hangs). The TS driver calls `child.stdin.end()`;
+  the Python driver should pass an empty stdin.
 - Auth: ChatGPT subscription login (no API key). Set `CODEX_HOME` to an isolated
   dir containing only `auth.json` to avoid AGENTS.md context pollution.
   `--ignore-user-config` still reads auth from `CODEX_HOME`.
