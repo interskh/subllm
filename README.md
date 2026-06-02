@@ -66,7 +66,7 @@ subllm/
 
 ```bash
 # from the consuming project
-uv add /path/to/subllm
+uv add /path/to/subllm/python
 ```
 
 or pin it as a path source in the consumer's `pyproject.toml`:
@@ -76,10 +76,10 @@ or pin it as a path source in the consumer's `pyproject.toml`:
 dependencies = ["subllm"]
 
 [tool.uv.sources]
-subllm = { path = "/path/to/subllm" }
+subllm = { path = "/path/to/subllm/python" }
 ```
 
-Editable install also works: `uv pip install -e /path/to/subllm`.
+Editable install also works: `uv pip install -e /path/to/subllm/python`.
 
 ## Quickstart
 
