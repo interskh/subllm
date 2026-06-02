@@ -6,7 +6,7 @@ official clients** — no per-token API billing, no request-rewriting proxy.
 
 Drop-in for a `BaseLLM` seam: `complete` / `complete_json` / `complete_json_schema`.
 
-**Status:** design complete, implementation not started.
+**Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI).
 
 - Design spec: [`docs/design.md`](docs/design.md)
 - Background research: [`docs/research/`](docs/research/)
