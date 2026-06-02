@@ -72,12 +72,14 @@ export async function runCodexExec(
 
   try {
     try {
-      await execFileP("codex", argv, {
+      const exec = execFileP("codex", argv, {
         env,
         cwd: workDir,
         timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
       });
+      exec.child.stdin?.end(); // codex exec reads stdin even with an argv prompt; close it so it doesn't hang
+      await exec;
     } catch (e: unknown) {
       const err = e as NodeJS.ErrnoException & {
         stdout?: string;
@@ -88,7 +90,7 @@ export async function runCodexExec(
         throw new ClientError("codex binary not found on PATH");
       }
       if (err.killed) {
-        throw new ClientError(`codex exec timed out after ${timeoutMs}ms`);
+        throw new ClientError(`codex exec was killed (timed out after ${timeoutMs}ms, or terminated by signal)`);
       }
       const blob = `${err.stderr ?? ""}\n${err.stdout ?? ""}`.trim();
       if (QUOTA_RE.test(blob)) {

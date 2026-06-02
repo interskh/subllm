@@ -139,4 +139,21 @@ sleep 5
       cleanup();
     }
   });
+
+  it("closes child stdin so codex does not hang waiting for piped input", async () => {
+    // codex exec reads stdin even with an argv prompt. This stub blocks on `cat`
+    // until stdin hits EOF; it only finishes if runCodexExec closed the child's stdin.
+    const cleanup = installFakeCodex(`#!/bin/bash
+cat > /dev/null            # read stdin to EOF; hangs forever if stdin stays open
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'stdin-was-closed' > "$out"
+`);
+    try {
+      // short timeout: if stdin were left open, this would reject (timeout) instead of resolving.
+      expect(await runCodexExec("x", { timeoutMs: 3000 })).toBe("stdin-was-closed");
+    } finally {
+      cleanup();
+    }
+  });
 });
