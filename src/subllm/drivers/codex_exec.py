@@ -14,8 +14,11 @@ from pathlib import Path
 from subllm.errors import ClientError, QuotaError
 
 # stderr substrings that mean "out of subscription budget", not a bug.
+# NOTE: "try again later" is intentionally NOT here — it is generic enough to
+# appear in auth/network errors, and QuotaError is the ONLY exception FallbackLLM
+# swallows. Misclassifying a real failure as quota would silently mask it.
 _QUOTA_PATTERNS = re.compile(
-    r"usage limit|rate.?limit|quota|too many requests|try again later",
+    r"usage limit|rate.?limit|quota|too many requests",
     re.IGNORECASE,
 )
 

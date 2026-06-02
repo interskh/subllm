@@ -50,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(client.complete(prompt))
         else:
             if args.schema:
-                schema_dict = json.loads(open(args.schema).read())
+                with open(args.schema) as fh:
+                    schema_dict = json.loads(fh.read())
                 result = client.complete_json(
                     prompt + "\n\nMatch this JSON schema: " + json.dumps(schema_dict)
                 )
