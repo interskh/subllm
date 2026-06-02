@@ -9,6 +9,7 @@ class _Stub(BaseLLM):
         self._raises = raises
         self._text = text
         self.calls = 0
+        self.last_schema = None
 
     def complete(self, prompt):
         self.calls += 1
@@ -21,6 +22,13 @@ class _Stub(BaseLLM):
         if self._raises:
             raise self._raises
         return {"ok": True}
+
+    def complete_json_schema(self, prompt, schema_model):
+        self.calls += 1
+        self.last_schema = schema_model
+        if self._raises:
+            raise self._raises
+        return {"validated": True}
 
 
 def test_uses_primary_when_it_succeeds():
@@ -54,3 +62,18 @@ def test_reraises_last_when_all_fail():
     b = _Stub(raises=QuotaError("b"))
     with pytest.raises(QuotaError):
         FallbackLLM(a, b).complete("x")
+
+
+def test_falls_back_on_quota_for_schema_path():
+    # complete_json_schema is the only 2-arg method, so this is the one path that
+    # exercises _dispatch's variadic *args forwarding: BOTH prompt and
+    # schema_model must reach the fallback client, not just the prompt.
+    class _Schema:
+        pass
+
+    primary = _Stub(raises=QuotaError("cap"))
+    backup = _Stub()
+    llm = FallbackLLM(primary, backup)
+    assert llm.complete_json_schema("x", _Schema) == {"validated": True}
+    assert primary.calls == 1 and backup.calls == 1
+    assert backup.last_schema is _Schema  # schema_model forwarded, not dropped
