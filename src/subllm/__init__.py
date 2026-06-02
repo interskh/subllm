@@ -1,6 +1,7 @@
 """subllm — subscription-native LLM clients."""
 from subllm.base import BaseLLM, DryRunLLM
 from subllm.codex import CodexLLM
+from subllm.claude import ClaudeLLM
 from subllm.errors import (
     ClientError,
     OutputError,
@@ -14,6 +15,7 @@ __all__ = [
     "BaseLLM",
     "DryRunLLM",
     "CodexLLM",
+    "ClaudeLLM",
     "RegionGuard",
     "SubllmError",
     "QuotaError",
