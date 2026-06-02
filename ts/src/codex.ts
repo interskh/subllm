@@ -81,8 +81,9 @@ export class CodexLLM implements BaseLLM {
           tmpdir(),
           `subllm-schema-${randomUUID()}.json`,
         );
-        await writeFile(schemaPath, schemaJson, "utf8");
         try {
+          // write inside the try so a failed write is still cleaned up
+          await writeFile(schemaPath, schemaJson, "utf8");
           const parsed = parseJsonObject(await this.run(prompt, schemaPath));
           // Don't trust codex's binding blindly — enforce the schema.
           return validateWithSchema(parsed, validate);
