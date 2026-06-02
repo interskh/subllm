@@ -102,6 +102,30 @@ printf 'ok' > "$out"
     }
   });
 
+  it("retries a transient driver failure and succeeds on a later attempt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "retry-"));
+    const counter = join(dir, "n");
+    const cleanup = installFakeCodex(`#!/bin/bash
+cat > /dev/null
+n=0; [ -f "${counter}" ] && n=$(cat "${counter}")
+n=$((n+1)); echo "$n" > "${counter}"
+if [ "$n" -lt 2 ]; then
+  echo "transient boom" >&2
+  exit 1
+fi
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'recovered' > "$out"
+`);
+    try {
+      const llm = new CodexLLM({ attempts: 3 });
+      expect(await llm.complete("x")).toBe("recovered");
+      expect(Number(readFileSync(counter, "utf8").trim())).toBe(2);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("survives >=5 concurrent calls without temp/output-file collisions", async () => {
     // The stub echoes back the prompt (the final argv element, after --). If two
     // concurrent calls shared an output file, results would cross-contaminate.
