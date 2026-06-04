@@ -68,7 +68,11 @@ export class CodexLLM implements BaseLLM {
     const validate = compileSchema(jsonSchema); // compile once (bad schema -> ClientError)
     let schemaJson: string;
     try {
-      schemaJson = JSON.stringify(jsonSchema);
+      // codex's --output-schema runs through OpenAI strict Structured-Outputs
+      // validation, which rejects a vanilla schema. Send the strict rewrite; the
+      // result is still validated against the ORIGINAL (lenient) schema above, so
+      // optional/nullable fields round-trip.
+      schemaJson = JSON.stringify(toStrictSchema(jsonSchema));
     } catch (e) {
       throw new ClientError(
         `invalid JSON schema passed to completeJsonSchema: ${String(e)}`,
@@ -94,6 +98,50 @@ export class CodexLLM implements BaseLLM {
       { attempts: this.attempts },
     );
   }
+}
+
+/** Rewrite an ordinary JSON Schema so codex's strict Structured-Outputs
+ *  validator accepts it: every object node gets `additionalProperties: false`
+ *  and lists all its properties as `required`, and `default: null` hints are
+ *  dropped. Recurses through `$defs`/`definitions`, `properties`, `items`, and
+ *  `anyOf`/`allOf`/`oneOf`/`prefixItems`. Returns a deep copy — the caller's
+ *  schema object is never mutated. */
+export function toStrictSchema(jsonSchema: object): object {
+  const clone = structuredClone(jsonSchema);
+  strictify(clone);
+  return clone;
+}
+
+function strictify(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) strictify(item);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+
+  // A null default would tell the model to omit a field that strict mode now
+  // forces it to emit. Real (non-null) defaults are tolerated and left intact.
+  if ("default" in obj && obj.default === null) delete obj.default;
+
+  if (isPlainObject(obj.properties)) {
+    obj.additionalProperties = false;
+    obj.required = Object.keys(obj.properties);
+  }
+
+  for (const key of ["properties", "$defs", "definitions"]) {
+    const members = obj[key];
+    if (isPlainObject(members)) {
+      for (const sub of Object.values(members)) strictify(sub);
+    }
+  }
+  for (const key of ["anyOf", "allOf", "oneOf", "prefixItems", "items"]) {
+    strictify(obj[key]);
+  }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> {
