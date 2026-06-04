@@ -91,9 +91,13 @@ The two files under `drivers/` are the **isolated subprocess contract** — the
 ## Clients
 
 ### CodexLLM (primary)
-- Drives `codex exec` in an **isolated `CODEX_HOME`** (a dir containing only a
-  copy/symlink of the real `auth.json`) plus `-s read-only --skip-git-repo-check
-  --ignore-user-config` to avoid context pollution.
+- Drives `codex exec` in an **isolated `CODEX_HOME`** (a throwaway dir containing
+  only a copy of the real `auth.json`, auto-provisioned when no `codex_home` is
+  given) plus `-s read-only --skip-git-repo-check --ignore-user-config
+  --ignore-rules --ephemeral -c project_doc_max_bytes=0` to avoid context
+  pollution. Note: `--ignore-user-config` skips `config.toml` *only* — the global
+  `~/.codex/AGENTS.md` persona is dropped by the isolated home, and the cwd's
+  project `AGENTS.md` by `project_doc_max_bytes=0`; both are required.
 - `complete` → final-message stdout (use `-o <tmpfile>` for robustness).
 - `complete_json` → instruct JSON in the prompt, parse, validate non-empty dict.
 - `complete_json_schema` → write `schema_model.model_json_schema()` to a temp

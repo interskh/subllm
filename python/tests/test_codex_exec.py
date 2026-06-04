@@ -1,4 +1,5 @@
 import json
+import os
 import pytest
 from subllm.drivers.codex_exec import run_codex_exec
 from subllm.errors import QuotaError, ClientError
@@ -79,3 +80,39 @@ def test_missing_binary_maps_to_client_error(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", str(tmp_path))  # no codex here
     with pytest.raises(ClientError):
         run_codex_exec("x", codex_home=str(tmp_path))
+
+
+def test_isolates_codex_home_when_none(fake_bin, tmp_path, monkeypatch):
+    # No codex_home => run in a throwaway scratch CODEX_HOME (auth.json carried
+    # in from the real home) so the user's global AGENTS.md / config / skills
+    # never pollute the summary. --ignore-user-config alone did NOT do this:
+    # it skips config.toml but leaves the global AGENTS.md persona intact, and
+    # the cwd's AGENTS.md needs project_doc_max_bytes=0 on top. This locks the
+    # full isolation contract the design intends.
+    src_home = tmp_path / "real_codex"
+    src_home.mkdir()
+    (src_home / "auth.json").write_text('{"token": "abc"}')
+    monkeypatch.setenv("CODEX_HOME", str(src_home))
+
+    probe = tmp_path / "probe.txt"
+    fake_bin("codex", rf'''#!/bin/bash
+{{
+  echo "HOME=$CODEX_HOME"
+  echo "ARGV=$@"
+  [ -f "$CODEX_HOME/auth.json" ] && echo "AUTH=yes" || echo "AUTH=no"
+}} > "{probe}"
+out=""
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+printf 'ok' > "$out"
+''')
+
+    run_codex_exec("summarize this")  # codex_home defaults to None
+
+    seen = probe.read_text()
+    scratch = seen.split("HOME=", 1)[1].splitlines()[0]
+    assert scratch != str(src_home)              # ran in a throwaway, not real home
+    assert "AUTH=yes" in seen                     # auth.json was carried in
+    assert "--ignore-rules" in seen
+    assert "--ephemeral" in seen
+    assert "project_doc_max_bytes=0" in seen
+    assert not os.path.exists(scratch)            # scratch cleaned up after the run

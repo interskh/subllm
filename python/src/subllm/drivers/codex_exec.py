@@ -1,12 +1,18 @@
 """Invoke `codex exec` (ChatGPT-subscription auth) as a clean text/JSON engine.
 
-Runs read-only and config-isolated to avoid the AGENTS.md context-pollution
-gotcha documented in docs/research.
+Runs fully isolated to avoid the context-pollution gotcha (docs/research):
+`--ignore-user-config` skips config.toml *only*, so on its own the user's global
+`~/.codex/AGENTS.md` persona and the cwd's project `AGENTS.md` still leak in. We
+close all of it — when no `codex_home` is given we run in a throwaway scratch
+`CODEX_HOME` holding only a copy of the real `auth.json` (no global AGENTS.md,
+config, rules, or skills), plus `--ignore-rules`, `--ephemeral`, and
+`-c project_doc_max_bytes=0` to drop the cwd-discovered project AGENTS.md.
 """
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -39,12 +45,16 @@ def run_codex_exec(
     """
     with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as out_f:
         out_path = out_f.name
+    scratch_home: str | None = None
     try:
         argv = [
             "codex", "exec",
             "-s", "read-only",
             "--skip-git-repo-check",
             "--ignore-user-config",
+            "--ignore-rules",
+            "--ephemeral",
+            "-c", "project_doc_max_bytes=0",
             "-o", out_path,
         ]
         if model:
@@ -63,6 +73,9 @@ def run_codex_exec(
         env = dict(os.environ)
         if codex_home:
             env["CODEX_HOME"] = codex_home
+        else:
+            scratch_home = _isolated_codex_home()
+            env["CODEX_HOME"] = scratch_home
 
         try:
             proc = subprocess.run(
@@ -88,3 +101,19 @@ def run_codex_exec(
             os.unlink(out_path)
         except OSError:
             pass
+        if scratch_home:
+            shutil.rmtree(scratch_home, ignore_errors=True)
+
+
+def _isolated_codex_home() -> str:
+    """Throwaway CODEX_HOME holding only a copy of the real auth.json.
+
+    Copy (not symlink) the current token so the run authenticates without
+    dragging in the real home's AGENTS.md / config / rules / skills.
+    """
+    src = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    scratch = tempfile.mkdtemp(prefix="subllm-codex-")
+    auth = src / "auth.json"
+    if auth.exists():
+        shutil.copy2(auth, Path(scratch) / "auth.json")
+    return scratch
