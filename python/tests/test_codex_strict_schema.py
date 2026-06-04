@@ -51,6 +51,23 @@ def test_strict_schema_drops_none_defaults_but_keeps_real_ones():
     assert strict["$defs"]["_Tag"]["properties"]["weight"]["default"] == 1.0
 
 
+class _Node(BaseModel):
+    name: str
+    children: list["_Node"] = Field(default_factory=list)   # self-referential
+
+
+def test_strict_schema_handles_recursive_models_without_infinite_loop():
+    # Self-referential models put the real object in $defs and point at it with
+    # $ref. The transform must strict-ify the $defs definition (recurse into
+    # $defs) WITHOUT following $ref targets — doing so would never terminate.
+    strict = _to_strict_schema(_Node.model_json_schema())
+    node = strict["$defs"]["_Node"]
+    assert node["additionalProperties"] is False
+    assert set(node["required"]) == {"name", "children"}
+    # the recursive reference stays a bare pointer, not an inlined copy
+    assert node["properties"]["children"]["items"] == {"$ref": "#/$defs/_Node"}
+
+
 def test_complete_json_schema_sends_strict_schema_to_codex(fake_bin, tmp_path):
     # Capture the schema file codex actually receives, and prove the nullable
     # round-trip: codex emits null for the now-required optionals, and the

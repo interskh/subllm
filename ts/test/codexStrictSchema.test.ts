@@ -50,6 +50,33 @@ describe("toStrictSchema", () => {
     toStrictSchema(ORDINARY);
     expect(JSON.stringify(ORDINARY)).toBe(before);
   });
+
+  it("strict-ifies recursive schemas without following $ref (no infinite loop)", () => {
+    // The real object lives in $defs and is referenced via $ref. The transform
+    // must recurse into $defs but NOT into $ref targets, or it never terminates.
+    const recursive = {
+      $defs: {
+        Node: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            children: { type: "array", items: { $ref: "#/$defs/Node" } },
+          },
+          required: ["name"],
+        },
+      },
+      $ref: "#/$defs/Node",
+    };
+    const strict = toStrictSchema(recursive) as any;
+    expect(strict.$defs.Node.additionalProperties).toBe(false);
+    expect(new Set(strict.$defs.Node.required)).toEqual(
+      new Set(["name", "children"]),
+    );
+    // the recursive reference stays a bare pointer, not an inlined copy
+    expect(strict.$defs.Node.properties.children.items).toEqual({
+      $ref: "#/$defs/Node",
+    });
+  });
 });
 
 describe("CodexLLM.completeJsonSchema strict-mode binding", () => {
