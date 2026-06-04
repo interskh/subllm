@@ -25,8 +25,9 @@ passing, codex path verified end-to-end against a live subscription.
   2026-06-15), detecting turn completion by tailing the JSONL transcript.
 - **`FallbackLLM`** — explicit, opt-in resilience: try the next client only on the
   exception types you name (default `QuotaError`); everything else fails loud.
-- **`RegionGuard`** — optional preflight that blocks a call if your public IP is
-  out of region (e.g. VPN dropped), off by default.
+- **`RegionGuard`** — optional preflight that blocks a call when your public IP is
+  in the wrong region (e.g. VPN dropped). Whitelist (`allowed_regions`) or
+  blacklist (`blocked_regions`) mode; off by default.
 - **`DryRunLLM`** — a no-op client that records prompts, for your own tests.
 
 ## Layout
@@ -176,12 +177,19 @@ data = CodexLLM(...).complete_json_schema("Summarize this thread: ...", Summary)
 ```python
 from subllm import CodexLLM, RegionGuard
 
+# Whitelist: subscription valid only in these regions — block unless inside them.
 guard = RegionGuard(allowed_regions={"US", "JP"})   # checks public IP before calling
+
+# Blacklist: tunneling out of a banned home region — block only if you land there.
+guard = RegionGuard(blocked_regions={"CN", "RU"})   # any other exit passes
+
 llm = CodexLLM(..., region_guard=guard)             # raises RegionError if out of region
 ```
 
-`RegionError` is a hard stop and is **not** a default `FallbackLLM` trigger — if
-you're out of region, every subscription client is equally blocked.
+Pass **exactly one** of `allowed_regions` / `blocked_regions` (both or neither
+raises `ValueError`). `RegionError` is a hard stop and is **not** a default
+`FallbackLLM` trigger — if you're out of region, every subscription client is
+equally blocked.
 
 ### DryRunLLM (for your tests)
 
@@ -271,7 +279,7 @@ npm --prefix ts test         # run the vitest suite
 | `CodexLLM` | `(model=None, reasoning_effort="medium", search=False, codex_home=None, region_guard=None, attempts=3, timeout_s=120)` |
 | `ClaudeLLM` | `(model=None, permission_mode="bypassPermissions", region_guard=None, attempts=3, timeout_s=300)` |
 | `FallbackLLM` | `(primary, *fallbacks, on=(QuotaError,))` |
-| `RegionGuard` | `(allowed_regions, lookup=default_lookup, ttl_s=300.0, on_lookup_failure="block")` |
+| `RegionGuard` | `(allowed_regions=None, blocked_regions=None, lookup=default_lookup, ttl_s=300.0, on_lookup_failure="block")` — pass exactly one of allowed/blocked |
 | `DryRunLLM` | `()` |
 | `BaseLLM` | abstract base; subclass to add a client |
 
