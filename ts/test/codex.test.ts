@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodexLLM } from "../src/codex.js";
-import { ClientError, OutputError } from "../src/errors.js";
+import { ClientError, OutputError, RegionError } from "../src/errors.js";
+import { RegionGuard } from "../src/preflight.js";
 import { installFakeCodex, echoStub } from "./helpers.js";
 
 const SCHEMA = {
@@ -147,5 +148,23 @@ printf '%s' "$prompt" > "$out"
     } finally {
       cleanup();
     }
+  });
+
+  it("regionGuard blocks before spawning codex and is not retried", async () => {
+    // No fake codex installed: if the guard didn't short-circuit, run() would
+    // spawn codex and fail differently. A counting lookup proves the hard stop
+    // isn't retried despite attempts=3 (RegionError is not in the retry set).
+    let lookups = 0;
+    const guard = new RegionGuard({
+      allowedRegions: ["US"],
+      lookup: async () => {
+        lookups += 1;
+        return "CN";
+      },
+      ttlMs: 0,
+    });
+    const llm = new CodexLLM({ regionGuard: guard, attempts: 3 });
+    await expect(llm.complete("x")).rejects.toBeInstanceOf(RegionError);
+    expect(lookups).toBe(1);
   });
 });

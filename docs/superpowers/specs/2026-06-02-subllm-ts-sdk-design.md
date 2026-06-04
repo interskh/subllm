@@ -40,16 +40,21 @@ both languages share.
   no schema normalization is needed.
 - **your-app will pass model `gpt-5.4-mini`.** The model string is forwarded
   verbatim to `codex exec -m` — never normalized, "corrected," or downgraded.
-- **Phase 1 is `CodexLLM` only.** Both your-app calls (classify-with-search and
-  write-verdict-no-search) go through codex. `ClaudeLLM`/tmux, `FallbackLLM`,
-  `RegionGuard`, and a CLI are out of scope for phase 1.
+- **Phase 1 is `CodexLLM`** plus the optional `RegionGuard` preflight. Both
+  your-app calls (classify-with-search and write-verdict-no-search) go through
+  codex. `ClaudeLLM`/tmux, `FallbackLLM`, and a CLI are out of scope for phase 1.
+- **`RegionGuard` mirrors the Python design** (`docs/.../subllm-v1-design.md`):
+  whitelist (`allowedRegions`) **or** blacklist (`blockedRegions`), exactly one;
+  off unless a guard is passed to `CodexLLM`. The lookup is `async` here (a
+  `fetch` geo-IP call), so `check()` returns a `Promise` and runs inside the
+  client's `run()` before any subprocess.
 
 ## Decisions (locked during brainstorming)
 
 | Decision | Choice |
 |---|---|
 | Repo layout | **Polyglot, peers under root**: existing Python moves to `python/`, new TS SDK at `ts/`. `docs/` + `README.md` stay shared at root. |
-| Scope (phase 1) | **`CodexLLM` + `DryRunLLM` + errors + retry + codex driver.** No Claude/tmux, no Fallback, no RegionGuard, no CLI. |
+| Scope (phase 1) | **`CodexLLM` + `DryRunLLM` + errors + retry + codex driver + optional `RegionGuard`.** No Claude/tmux, no Fallback, no CLI. |
 | Module system | **ESM-only**, `"type": "module"`, `engines.node >= 20`. No browser target, no CJS. |
 | Build | **`tsc`** → `dist/` (`.js` + `.d.ts`), `exports` map. No bundler. |
 | Test runner | **vitest** (universal across sibling TS projects). |
@@ -253,7 +258,6 @@ This mirrors `base.py`'s `_retry`. There is no cross-client failover in phase 1
 
 - `ClaudeLLM` / tmux driver.
 - `FallbackLLM`.
-- `RegionGuard` / `RegionError`.
 - A TypeScript CLI (your-app imports the package directly).
 - Streaming responses; CJS/browser builds.
 - Any HTTP server / proxy (forbidden by the hard constraint).
