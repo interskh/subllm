@@ -12,6 +12,11 @@ subllm = "subllm.cli:main"
 [dependency-groups]
 dev = ["pytest>=8"]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: live tests that call the real codex/claude subscriptions; opt in with SUBLLM_LIVE=1",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

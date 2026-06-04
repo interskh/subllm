@@ -33,4 +33,7 @@ drives the real official CLIs as subprocesses.
 5. `FallbackLLM` + drivers-contract docs
 
 Tooling: `uv` for venv/deps. Tests use stub `codex`/`tmux` binaries on PATH — no
-real subscription calls in tests.
+real subscription calls in tests. The one exception is the opt-in live smoke
+suite (`tests/test_integration.py`), skipped unless `SUBLLM_LIVE=1`; run it with
+`SUBLLM_LIVE=1 uv run pytest -m integration` to verify the clients against the
+real subscriptions.
