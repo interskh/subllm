@@ -115,25 +115,42 @@ The two files under `drivers/` are the **isolated subprocess contract** — the
 
 ## Region preflight (optional, config-gated)
 
-Some users' subscriptions are only valid from supported regions; if their VPN is
-disconnected their public IP may fall outside it. Firing a request in that state
-can fail or risk the account, so subllm can check **before** the call.
+A user's IP region can mismatch their subscription's expectations in two opposite
+ways, so `RegionGuard` supports two mutually-exclusive modes (exactly one per
+guard). Firing a request from the wrong region can fail or risk the account, so
+subllm can check **before** the call.
+
+- **Whitelist (`allowed_regions`)** — *"my subscription is valid only in these
+  regions; keep me inside them."* Default-deny: block unless the public IP's
+  country is in the set. Guards against a dropped VPN leaving a supported home
+  region.
+- **Blacklist (`blocked_regions`)** — *"I tunnel out of an unsupported/banned home
+  region; never let me appear there."* Default-allow: block only if the country is
+  in the set. The user need not enumerate every acceptable VPN exit — only the few
+  regions to avoid. (Strictly weaker than a whitelist for the supported-only case;
+  it models the opposite threat, so the two are not interchangeable.)
+
+Details:
 
 - `preflight.py` exposes a `RegionGuard` with a `check()` method.
-- Off by default. Enabled per-client via constructor: `region_check=True`
-  (or pass a configured `RegionGuard`), with `allowed_regions: set[str]`
-  (ISO country codes) and an optional `ttl_s` cache.
+- Off by default. Enabled per-client by passing a configured `RegionGuard` to the
+  client constructor (`region_guard=`). Construct with **exactly one** of
+  `allowed_regions` / `blocked_regions` (ISO country codes) plus an optional
+  `ttl_s` cache. Both or neither → `ValueError` (one mode only, enforced loudly at
+  construction).
 - On enable: before the first call (cached for `ttl_s`), resolve the current
   public IP's country via a pluggable lookup (default: a small HTTP geo-IP
-  service; the lookup fn is injectable so it can be stubbed/replaced). If the
-  country is not in `allowed_regions`, raise **`RegionError`** with a clear
-  message ("public IP in <CC>; expected one of {…} — is your VPN connected?").
+  service; the lookup fn is injectable so it can be stubbed/replaced). Raise
+  **`RegionError`** with a clear message — whitelist: "public IP in <CC>; expected
+  one of {…} — is your VPN connected?"; blacklist: "public IP in <CC>, a blocked
+  region — is your VPN connected?".
 - `RegionError` is a hard stop, **not** a `FallbackLLM` trigger by default
   (if you're out-of-region, every subscription client is equally blocked —
   falling through would just risk a second account). Callers may opt in.
 - Failure of the lookup itself (network down, service error) is configurable:
   `on_lookup_failure="block" | "allow"` (default `block` — fail loud rather than
-  fire a possibly-out-of-region request).
+  fire a possibly-out-of-region request). The default is safe for both modes:
+  if the country can't be confirmed, don't fire.
 
 ## Fallback (explicit, fail-loud)
 

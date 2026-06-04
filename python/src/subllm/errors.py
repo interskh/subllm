@@ -21,7 +21,8 @@ class OutputError(SubllmError):
 
 
 class RegionError(SubllmError):
-    """Preflight: public IP outside allowed regions (or lookup failed under block).
+    """Preflight: public IP fails the region guard — outside allowed_regions, or
+    inside blocked_regions, or the lookup failed under on_lookup_failure='block'.
 
     Hard stop; NOT a default fallback trigger — every subscription client is
     equally out-of-region.

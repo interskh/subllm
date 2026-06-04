@@ -1,9 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { SubllmError, QuotaError, ClientError, OutputError } from "../src/errors.js";
+import {
+  SubllmError,
+  QuotaError,
+  ClientError,
+  OutputError,
+  RegionError,
+} from "../src/errors.js";
 
 describe("errors", () => {
-  it("Quota/Client/Output all subclass SubllmError", () => {
-    for (const E of [QuotaError, ClientError, OutputError]) {
+  it("Quota/Client/Output/Region all subclass SubllmError", () => {
+    for (const E of [QuotaError, ClientError, OutputError, RegionError]) {
       expect(new E("x")).toBeInstanceOf(SubllmError);
     }
   });

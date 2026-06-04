@@ -19,3 +19,8 @@ export class ClientError extends SubllmError {}
 
 /** Model output unusable: empty, invalid JSON, or schema-validation mismatch. */
 export class OutputError extends SubllmError {}
+
+/** Preflight: public IP fails the region guard — outside allowedRegions, inside
+ *  blockedRegions, or the lookup failed under onLookupFailure='block'. Hard stop;
+ *  NOT a retry/fallback trigger — every subscription client is equally blocked. */
+export class RegionError extends SubllmError {}

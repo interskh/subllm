@@ -7,6 +7,7 @@ import type { BaseLLM } from "./base.js";
 import { retry, compileSchema, validateWithSchema } from "./base.js";
 import { runCodexExec } from "./drivers/codexExec.js";
 import { ClientError, OutputError } from "./errors.js";
+import type { RegionGuard } from "./preflight.js";
 
 const JSON_INSTRUCTION =
   "\n\nReturn ONLY a single JSON object. No prose, no code fence.";
@@ -16,6 +17,7 @@ export interface CodexOptions {
   reasoningEffort?: string;
   search?: boolean;
   codexHome?: string;
+  regionGuard?: RegionGuard;
   attempts?: number;
   timeoutMs?: number;
 }
@@ -25,6 +27,7 @@ export class CodexLLM implements BaseLLM {
   private readonly reasoningEffort: string;
   private readonly search: boolean;
   private readonly codexHome?: string;
+  private readonly regionGuard?: RegionGuard;
   private readonly attempts: number;
   private readonly timeoutMs: number;
 
@@ -33,11 +36,13 @@ export class CodexLLM implements BaseLLM {
     this.reasoningEffort = opts.reasoningEffort ?? "medium";
     this.search = opts.search ?? false;
     this.codexHome = opts.codexHome;
+    this.regionGuard = opts.regionGuard;
     this.attempts = opts.attempts ?? 3;
     this.timeoutMs = opts.timeoutMs ?? 120_000;
   }
 
-  private run(prompt: string, schemaPath?: string): Promise<string> {
+  private async run(prompt: string, schemaPath?: string): Promise<string> {
+    if (this.regionGuard) await this.regionGuard.check(); // RegionError before any subprocess
     return runCodexExec(prompt, {
       model: this.model,
       reasoningEffort: this.reasoningEffort,
