@@ -2,6 +2,7 @@
   "name": "subllm",
   "version": "0.1.0",
   "description": "Drive codex exec from TypeScript on flat-rate ChatGPT-subscription quota (client-native, no proxy).",
+  "license": "MIT",
   "type": "module",
   "engines": { "node": ">=20" },
   "exports": {
