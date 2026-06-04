@@ -55,7 +55,11 @@ class CodexLLM(BaseLLM):
         return _retry(_call, attempts=self._attempts)
 
     def complete_json_schema(self, prompt: str, schema_model: type) -> dict[str, Any]:
-        schema = json.dumps(schema_model.model_json_schema())
+        # codex's --output-schema runs through OpenAI strict Structured-Outputs
+        # validation, which rejects a vanilla model_json_schema(). Rewrite it to
+        # strict form; the result is still re-validated against the ORIGINAL
+        # (lenient) model below, so optional/nullable fields round-trip.
+        schema = json.dumps(_to_strict_schema(schema_model.model_json_schema()))
         def _call() -> dict[str, Any]:
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".json", delete=False
@@ -69,6 +73,44 @@ class CodexLLM(BaseLLM):
             # Don't trust codex's binding blindly — validate against the model.
             return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
+
+
+def _to_strict_schema(node: Any) -> Any:
+    """Rewrite an ordinary JSON Schema in place so codex's strict
+    Structured-Outputs validator accepts it: every object node gets
+    `additionalProperties: false` and lists all its properties as `required`,
+    and `default: null` hints (which Pydantic emits for `Optional[...] = None`)
+    are dropped. Mirrors OpenAI's reference to_strict_json_schema for the shapes
+    Pydantic v2 produces — nested `$defs`, `anyOf` unions, bare `$ref` (no
+    sibling-`$ref` inlining, which Pydantic v2 doesn't emit). Returns `node`.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _to_strict_schema(item)
+        return node
+    if not isinstance(node, dict):
+        return node
+
+    # A null default would tell the model to omit a field that strict mode now
+    # forces it to emit. Real (non-null) defaults are tolerated and left intact.
+    if "default" in node and node["default"] is None:
+        del node["default"]
+
+    props = node.get("properties")
+    if isinstance(props, dict):
+        node["additionalProperties"] = False
+        node["required"] = list(props.keys())
+
+    for key in ("properties", "$defs", "definitions"):
+        members = node.get(key)
+        if isinstance(members, dict):
+            for sub in members.values():
+                _to_strict_schema(sub)
+
+    for key in ("anyOf", "allOf", "oneOf", "prefixItems", "items"):
+        _to_strict_schema(node.get(key))
+
+    return node
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
