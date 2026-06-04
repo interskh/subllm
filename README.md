@@ -10,8 +10,9 @@ that already codes against `complete` / `complete_json` / `complete_json_schema`
 can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one with
 no call-site changes.
 
-**Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), 46 tests
-passing, codex path verified end-to-end against a live subscription.
+**Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI). 56 hermetic
+tests passing, plus a 6-test opt-in live suite — both the codex and claude paths
+verified end-to-end against live subscriptions.
 
 ## What it does
 
@@ -216,6 +217,30 @@ stderr with a non-zero exit code. Example:
 ```bash
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
+
+## Testing
+
+The default suite is **hermetic** — it stubs `codex`/`tmux` with fake executables
+on `PATH`, so it never touches a real subscription or the network:
+
+```bash
+cd python
+uv run pytest                 # 56 tests, no subscription, no network
+```
+
+A separate **opt-in live suite** drives the real subscriptions to confirm both
+clients work end-to-end. It is skipped unless `SUBLLM_LIVE=1` is set (so CI and a
+normal `pytest` run never bill you), and each client self-skips if its binaries
+aren't on `PATH`; a `QuotaError` becomes a skip rather than a failure:
+
+```bash
+SUBLLM_LIVE=1 uv run pytest -m integration            # codex + claude
+SUBLLM_LIVE=1 uv run pytest -m integration -k codex   # codex only
+SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
+```
+
+Requires `codex` logged in to a ChatGPT plan; the claude tests additionally need
+`claude` (logged in to Pro/Max) and `tmux`.
 
 ## TypeScript SDK (`ts/`)
 
