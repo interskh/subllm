@@ -34,6 +34,38 @@ def test_lookup_failure_can_allow():
     guard.check()  # no raise
 
 
+def test_blacklist_allows_any_unblocked_country():
+    # Threat model B: tunneling out of a banned home region. Any VPN exit that
+    # isn't the blocked region must pass without being enumerated up front.
+    guard = RegionGuard(blocked_regions={"CN"}, lookup=lambda: "US", ttl_s=0)
+    guard.check()  # no raise
+
+
+def test_blacklist_blocks_blocked_country():
+    guard = RegionGuard(blocked_regions={"CN", "RU"}, lookup=lambda: "CN", ttl_s=0)
+    with pytest.raises(RegionError) as ei:
+        guard.check()
+    assert "CN" in str(ei.value)
+    assert "blocked" in str(ei.value)
+
+
+def test_blacklist_lookup_failure_blocks_by_default():
+    # Can't confirm we're outside the banned region -> don't fire.
+    def boom():
+        raise OSError("network down")
+
+    guard = RegionGuard(blocked_regions={"CN"}, lookup=boom, ttl_s=0)
+    with pytest.raises(RegionError):
+        guard.check()
+
+
+def test_requires_exactly_one_mode():
+    with pytest.raises(ValueError):
+        RegionGuard(allowed_regions={"US"}, blocked_regions={"CN"})
+    with pytest.raises(ValueError):
+        RegionGuard()
+
+
 def test_result_is_cached_within_ttl():
     calls = {"n": 0}
 
