@@ -13,15 +13,45 @@ from typing import Callable
 from subllm.errors import RegionError
 
 
+# Free geo-IP endpoints, tried in order, each with the JSON key holding the ISO
+# country code. More than one because every free tier rate-limits, and a single
+# provider makes its quota a single point of failure for every model call: one
+# exhausted quota blanked a week of wechat-digest runs with
+# `region lookup failed (HTTP Error 429)` while the IP was in fact unblocked.
+#
+# First success wins and the rest are not consulted. Deliberately NOT a quorum:
+# these answer one narrow question from the same observable fact (the source IP
+# of the request), disagreement between them would be a provider bug rather than
+# a signal, and a tie-break would mean more requests against the quotas that
+# caused the problem.
+_LOOKUP_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("https://ipinfo.io/json", "country"),
+    ("https://api.country.is/", "country"),
+    ("https://ifconfig.co/json", "country_iso"),
+)
+
+
 def default_lookup(timeout_s: float = 5.0) -> str:
     """Resolve the current public IP's ISO country code via a small geo-IP HTTP
-    service. Injectable so tests/consumers can replace it."""
-    with urllib.request.urlopen("https://ipinfo.io/json", timeout=timeout_s) as resp:
-        data = json.loads(resp.read().decode())
-    country = data.get("country")
-    if not country:
-        raise RuntimeError("geo-IP lookup returned no country")
-    return country
+    service. Injectable so tests/consumers can replace it.
+
+    Raises the FIRST provider's error when every provider fails, since that is
+    the one whose outage the caller is most likely acting on.
+    """
+    first: Exception | None = None
+    for url, key in _LOOKUP_PROVIDERS:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+                data = json.loads(resp.read().decode())
+            country = data.get(key)
+            if not country:
+                raise RuntimeError(f"geo-IP lookup at {url} returned no country")
+            return str(country)
+        except Exception as e:  # noqa: BLE001 — try the next provider
+            if first is None:
+                first = e
+    assert first is not None
+    raise first
 
 
 class RegionGuard:

@@ -1,5 +1,6 @@
 import pytest
-from subllm.preflight import RegionGuard
+from subllm import preflight
+from subllm.preflight import RegionGuard, default_lookup
 from subllm.errors import RegionError
 
 
@@ -218,3 +219,74 @@ def test_allow_policy_still_short_circuits_a_cached_failure():
 def test_lookup_attempts_must_be_at_least_one():
     with pytest.raises(ValueError):
         RegionGuard(blocked_regions={"CN"}, lookup_attempts=0)
+
+
+# ── provider fallback ───────────────────────────────────────────────────────
+# Every free geo-IP tier rate-limits, so one provider is a single point of
+# failure for every model call behind the guard.
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body.encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _urlopen_script(script):
+    """script: {url -> body string or Exception}."""
+    def fake(url, timeout=None):
+        outcome = script[url]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _FakeResp(outcome)
+    return fake
+
+
+def test_lookup_falls_through_to_the_next_provider(monkeypatch):
+    urls = [u for u, _ in preflight._LOOKUP_PROVIDERS]
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", _urlopen_script({
+        urls[0]: OSError("HTTP Error 429: Too Many Requests"),
+        urls[1]: '{"country": "JP"}',
+    }))
+    assert default_lookup() == "JP"
+
+
+def test_lookup_reads_each_providers_own_country_key(monkeypatch):
+    """The providers do not agree on a field name; a wrong key would silently
+    read as 'no country' and skip a provider that actually answered."""
+    urls = [u for u, _ in preflight._LOOKUP_PROVIDERS]
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", _urlopen_script({
+        urls[0]: OSError("down"),
+        urls[1]: OSError("down"),
+        urls[2]: '{"country": "Japan", "country_iso": "JP"}',
+    }))
+    assert default_lookup() == "JP"
+
+
+def test_a_provider_answering_without_a_country_is_not_accepted(monkeypatch):
+    """A 200 carrying no country must fall through, not return an empty string
+    that would then be compared against the blocklist and pass."""
+    urls = [u for u, _ in preflight._LOOKUP_PROVIDERS]
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", _urlopen_script({
+        urls[0]: '{"bogus": true}',
+        urls[1]: '{"country": "US"}',
+    }))
+    assert default_lookup() == "US"
+
+
+def test_all_providers_failing_raises_the_first_error(monkeypatch):
+    urls = [u for u, _ in preflight._LOOKUP_PROVIDERS]
+    monkeypatch.setattr(preflight.urllib.request, "urlopen", _urlopen_script(
+        {u: OSError(f"down {i}") for i, u in enumerate(urls)}
+    ))
+    with pytest.raises(OSError) as ei:
+        default_lookup()
+    assert "down 0" in str(ei.value)
