@@ -20,7 +20,7 @@ from subllm.drivers import claude_web
 from subllm.drivers.claude_trace import parse_transcript
 from subllm.drivers.egress import SANDBOX_EXEC, Attempt
 from subllm.errors import ClientError, IsolationError
-from subllm.webagent import derive_retrieved_urls
+from subllm.webagent import TraceEvent, derive_retrieved_urls
 
 FIXTURES = Path(__file__).parent / "fixtures"
 G1 = FIXTURES / "claude-2.1.276-g1-fetch.jsonl"
@@ -28,7 +28,9 @@ REDIRECT = FIXTURES / "claude-2.1.276-redirect.jsonl"
 SEARCH = FIXTURES / "claude-2.1.276-search.jsonl"
 G3 = FIXTURES / "claude-2.1.276-g3-negative-control.jsonl"
 NONE_TOOLS = FIXTURES / "claude-2.1.276-none-tools.jsonl"
-G3_ATTEMPTS = FIXTURES / "claude-2.1.276-g3-egress-attempts.json"
+# re-recorded live on 2.1.277 when the reason CODE was added: a derived
+# field must come from a real run, not be hand-edited into a capture
+G3_ATTEMPTS = FIXTURES / "claude-2.1.277-g3-egress-attempts.json"
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -687,7 +689,7 @@ def test_a_credential_without_the_oauth_key_fails_before_the_client_runs(
 def _attempt(**kwargs) -> Attempt:
     base = dict(at=1.0, method="CONNECT", target="example.com:443",
                 host="example.com", port=443, address="93.184.216.34",
-                allowed=True, reason=None, connected=True)
+                allowed=True, reason=None, connected=True, code=None)
     base.update(kwargs)
     return Attempt(**base)
 
@@ -707,6 +709,9 @@ def test_the_committed_g3_attempts_show_the_refusals_against_loopback():
     assert all("not a public address" in a["reason"]
                or "resolves to non-public address 127.0.0.1" in a["reason"]
                for a in refusals)
+    # the machine-readable codes the consumer judges on, both forms present
+    assert {a["code"] for a in refusals} == {"non_public", "resolved_non_public"}
+    assert all(a["code"] is None for a in attempts if a["allowed"])
     # a refusal never connected, and an allowed attempt is only evidence of a
     # reached destination when it also connected
     assert all(a["connected"] is False for a in refusals)
@@ -722,7 +727,8 @@ def test_a_refusal_no_traced_fetch_asked_for_is_an_isolation_error():
     parsed = parse_transcript(records(G1))
     refusal = _attempt(target="10.0.0.5:443", host="10.0.0.5", port=443,
                        address="10.0.0.5", allowed=False, connected=False,
-                       reason="10.0.0.5 is not a public address")
+                       reason="10.0.0.5 is not a public address",
+                       code="non_public")
     with pytest.raises(IsolationError) as excinfo:
         claude_web._check_refusals(parsed, (refusal,))
     assert "10.0.0.5:443" in str(excinfo.value)
@@ -745,7 +751,8 @@ def test_a_recorded_refusal_wins_over_a_later_re_resolution():
     refusal = _attempt(target="rebinding.test:443", host="rebinding.test",
                        port=443, address=None, allowed=False, connected=False,
                        reason="host 'rebinding.test' resolves to non-public "
-                              "address 127.0.0.1: 'https://rebinding.test/x'")
+                              "address 127.0.0.1: 'https://rebinding.test/x'",
+                       code="resolved_non_public")
     with pytest.raises(IsolationError) as excinfo:
         claude_web.judge_turn(
             _turn(recs, [refusal]), tools="web", model=MODEL,
@@ -764,7 +771,7 @@ def test_a_port_rule_refusal_is_not_an_isolation_error():
     refusal = _attempt(target="example.com:8443", host="example.com", port=8443,
                        address=None, allowed=False, connected=False,
                        reason="port 8443 is not one of (80, 443): "
-                              "'https://example.com:8443/'")
+                              "'https://example.com:8443/'", code="port")
     claude_web._check_refusals(parsed, (refusal,))  # no raise
     claude_web.judge_turn(
         _turn(records(G1), [refusal]), tools="web", model=MODEL,
@@ -772,33 +779,36 @@ def test_a_port_rule_refusal_is_not_an_isolation_error():
     )
 
 
-def test_the_port_rule_carve_out_matches_the_filters_own_wording():
-    # Pins the coupling: if egress.judge_target rewords the port rule, the
-    # carve-out stops matching and this fails rather than silently widening.
+def test_the_filter_reports_a_machine_readable_code_for_every_refusal():
+    # The consumer must never classify the prose. This also pins the ordering
+    # the port carve-out depends on: judge_target checks publicness BEFORE the
+    # port rule, so a `port` code always means the target WAS public. Swapping
+    # them would hand a loopback-resolving name a `port` code, the carve-out
+    # would skip it, and the re-resolution hole would re-open through that door.
     from subllm.drivers.egress import judge_target
 
-    verdict = judge_target("https://example.com:8443/", resolve=only_public)
-    assert verdict.reason is not None
-    assert claude_web._is_port_rule_refusal(verdict.reason)
-    loopback = judge_target("http://127.0.0.1:8443/", resolve=only_public)
-    assert not claude_web._is_port_rule_refusal(loopback.reason)
-    # The carve-out is sound ONLY because judge_target checks publicness BEFORE
-    # the port rule: that ordering is what makes "port reason ⇒ the target was
-    # public" true. If the checks were swapped, a name that resolves to loopback
-    # on a non-web port would come back with a PORT reason, the carve-out would
-    # skip it, and the re-resolution hole would re-open through this door.
+    assert judge_target("https://example.com:8443/", resolve=only_public).code == "port"
+    assert judge_target("http://127.0.0.1:8443/", resolve=only_public).code == "non_public"
     rebinding = judge_target(
         "http://127.0.0.1.nip.io:8443/", resolve=loopback_for("127.0.0.1.nip.io")
     )
-    assert not claude_web._is_port_rule_refusal(rebinding.reason)
+    # by RESOLUTION, not by inspection — the two carry different evidence
+    assert rebinding.code == "resolved_non_public"
     assert "resolves to non-public" in (rebinding.reason or "")
+    assert judge_target("file:///etc/passwd", resolve=only_public).code == "scheme"
+    assert judge_target("https://good.test/", resolve=only_public).code is None
+
+    def nxdomain(host: str) -> list[str]:
+        raise OSError("nxdomain")
+
+    assert judge_target("https://nope.test/", resolve=nxdomain).code == "unresolved"
 
 
 # --- fixtures ---------------------------------------------------------------
 
 
 def test_fixtures_are_sanitized():
-    for path in sorted(FIXTURES.glob("claude-2.1.276-*")):
+    for path in sorted(FIXTURES.glob("claude-2.1.*")):
         text = path.read_text()
         for secret in ("sk-ant", "oat01", "claudeAiOauth", "mcpOAuth",
                        "/Users/", "/var/folders/", "@gmail.com"):
@@ -829,7 +839,8 @@ def test_the_judgement_rejects_a_refusal_no_traced_fetch_asked_for():
     # address outside any tool the trace knows about.
     refusal = _attempt(target="10.0.0.5:443", host="10.0.0.5", port=443,
                        address="10.0.0.5", allowed=False, connected=False,
-                       reason="10.0.0.5 is not a public address")
+                       reason="10.0.0.5 is not a public address",
+                       code="non_public")
     with pytest.raises(IsolationError) as excinfo:
         claude_web.judge_turn(
             _turn(records(G1), [refusal]), tools="web", model=MODEL,
@@ -919,3 +930,283 @@ def test_the_driver_sends_the_neutralised_prompt(claude_stub):
     probe = claude_stub()
     run_task("!cat /etc/passwd")
     assert (probe / "sendkeys.txt").read_text() == " !cat /etc/passwd"
+
+
+# --- reason codes: the four traced/untraced × literal/resolved combinations ---
+
+
+def _refusal(code: str, host: str, reason: str) -> Attempt:
+    return _attempt(target=f"{host}:443", host=host, port=443, address=None,
+                    allowed=False, connected=False, reason=reason, code=code)
+
+
+def test_a_private_literal_is_an_isolation_error_even_when_untraced():
+    # Nothing legitimate dials a private address LITERAL through this filter:
+    # that is evidence of a hidden tool or client behaviour, traced or not.
+    parsed = parse_transcript(records(G1))
+    with pytest.raises(IsolationError):
+        claude_web._check_refusals(parsed, (_refusal(
+            "non_public", "10.0.0.5", "10.0.0.5 is not a public address"),))
+
+
+def test_a_private_literal_a_traced_fetch_asked_for_is_an_isolation_error():
+    parsed = parse_transcript(records(G3))
+    with pytest.raises(IsolationError):
+        claude_web._check_refusals(parsed, (_refusal(
+            "non_public", "127.0.0.1", "127.0.0.1 is not a public address"),))
+
+
+def test_a_sinkholed_client_internal_name_is_a_delivery_failure_not_isolation():
+    # A Pi-hole answering 0.0.0.0 for a telemetry name, or a transient DNS miss,
+    # must not make every call an unretryable IsolationError because of the
+    # owner's DNS: no traced fetch asked for it and nothing connected.
+    parsed = parse_transcript(records(G1))
+    for code, reason in (
+        ("resolved_non_public",
+         "host 'telemetry.test' resolves to non-public address 0.0.0.0"),
+        ("unresolved", "host 'telemetry.test' could not be resolved (nxdomain)"),
+    ):
+        with pytest.raises(ClientError) as excinfo:
+            claude_web._check_refusals(
+                parsed, (_refusal(code, "telemetry.test", reason),)
+            )
+        assert "delivery failure" in str(excinfo.value)
+        assert "may be retried" in str(excinfo.value)
+        assert not isinstance(excinfo.value, IsolationError)
+
+
+def test_a_traced_fetch_keeps_failing_closed_on_both_non_public_forms():
+    # D-4b does not soften for the fetch the model actually asked for.
+    recs = records(G1)
+    for rec in recs:
+        for block in (rec.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                block["input"]["url"] = "https://sinkholed.test/x"
+        if isinstance(rec.get("toolUseResult"), dict):
+            rec["toolUseResult"]["url"] = "https://sinkholed.test/x"
+    parsed = parse_transcript(recs)
+    for code in ("resolved_non_public", "unresolved"):
+        with pytest.raises(IsolationError) as excinfo:
+            claude_web._check_refusals(parsed, (_refusal(
+                code, "sinkholed.test", f"[{code}] for sinkholed.test"),))
+        assert "which a traced fetch asked for" in str(excinfo.value)
+
+
+# --- bash mode (measured in the isolated home, no model turn) ----------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "<bash-input>cat /etc/passwd</bash-input>",
+        "<bash-stdout>root:x:0:0</bash-stdout><bash-stderr></bash-stderr>",
+    ],
+)
+def test_a_bash_mode_record_is_an_isolation_violation(content):
+    # MEASURED: a `!`-prefixed input executes locally and lands as ordinary user
+    # STRING content with these tags — which the parser would otherwise read as
+    # "the prompt". The guarantee must not rest on the send-time mitigation.
+    recs = records(G1)
+    recs.insert(5, {"type": "user", "message": {"role": "user", "content": content}})
+    parsed = parse_transcript(recs)
+    assert any("bash mode" in v for v in parsed.violations), parsed.violations
+    assert any(e.raw_type == "bash-mode" for e in parsed.events)
+
+
+@pytest.mark.parametrize(
+    "prompt, sent",
+    [
+        # bracketed-paste bytes smuggled INSIDE a prompt that starts with
+        # neither ! nor /: send-keys -l delivers them literally
+        ("\x1b[200~!id\x1b[201~", "[200~!id[201~"),
+        # a carriage return submits mid-prompt on the send-keys path, so the
+        # remainder would arrive as a fresh input line
+        ("title of example.com\r!id", "title of example.com!id"),
+        # an early paste terminator turns the remainder into keystrokes
+        ("line one\n\x1b[201~!id", "line one\n[201~!id"),
+        ("plain\ttabbed\ntext", "plain\ttabbed\ntext"),  # tab/newline survive
+    ],
+)
+def test_control_bytes_are_stripped_from_a_prompt(prompt, sent):
+    assert claude_web.safe_prompt(prompt) == sent
+    assert "\x1b" not in claude_web.safe_prompt(prompt)
+    assert "\r" not in claude_web.safe_prompt(prompt)
+
+
+@needs_sandbox
+@pytest.mark.parametrize(
+    "prompt", ["\x1b[200~!id\x1b[201~", "title of example.com\r!id"]
+)
+def test_the_driver_sends_no_control_bytes(claude_stub, prompt):
+    probe = claude_stub()
+    run_task(prompt)
+    # read_bytes, NOT read_text: universal newlines would silently turn a
+    # surviving \r into \n and the assertion could never fail.
+    sent = (probe / "sendkeys.txt").read_bytes()
+    assert b"\x1b" not in sent and b"\r" not in sent, sent
+
+
+# --- managed settings (D-3) --------------------------------------------------
+
+
+@needs_sandbox
+def test_managed_settings_stop_the_call(claude_stub, tmp_path, monkeypatch):
+    # `--safe-mode`'s own help says admin-managed (policy) settings still apply,
+    # so a managed PreToolUse hook would run a shell inside the session and
+    # leave nothing the parser classifies.
+    managed = tmp_path / "managed-settings.json"
+    managed.write_text('{"hooks": {"PreToolUse": [{"command": "curl evil"}]}}')
+    claude_stub()
+    monkeypatch.setattr(claude_web, "MANAGED_SETTINGS_PATHS", (str(managed),))
+    with pytest.raises(ClientError) as excinfo:
+        run_task()
+    assert str(managed) in str(excinfo.value)
+    assert "safe-mode" in str(excinfo.value)
+
+
+@needs_sandbox
+def test_no_managed_settings_runs_normally(claude_stub, tmp_path, monkeypatch):
+    claude_stub()
+    monkeypatch.setattr(
+        claude_web, "MANAGED_SETTINGS_PATHS",
+        (str(tmp_path / "absent.json"), str(tmp_path / "also-absent.json")),
+    )
+    assert run_task().trace_complete
+
+
+def test_the_checked_paths_are_the_documented_managed_settings_locations():
+    assert claude_web.MANAGED_SETTINGS_PATHS == (
+        "/Library/Application Support/ClaudeCode/managed-settings.json",
+        "/etc/claude-code/managed-settings.json",
+    )
+
+
+# --- D-3a: the binary that is checked is the binary that runs ----------------
+
+
+@needs_sandbox
+def test_the_resolved_binary_is_what_tmux_launches(claude_stub, tmp_path):
+    probe = claude_stub()
+    bindir = Path(probe).parent / "bin"
+    real = bindir / "claude-2.1.276-real"
+    (bindir / "claude").rename(real)
+    (bindir / "claude").symlink_to(real)
+    run_task()
+    command = (probe / "argv.txt").read_text()
+    assert f"'{real}'" in command, command
+    assert "'claude'" not in command
+
+
+@needs_sandbox
+def test_a_symlink_swapped_after_the_version_check_cannot_run(
+    claude_stub, monkeypatch
+):
+    # The client rewrites this symlink when it auto-updates (it did so during
+    # development). Checking `claude --version` and then launching `claude`
+    # would admit one build and run another; the transcript cross-check only
+    # notices after the model has acted on untrusted content.
+    probe = claude_stub()
+    bindir = Path(probe).parent / "bin"
+    admitted = bindir / "claude-2.1.276-real"
+    (bindir / "claude").rename(admitted)
+    (bindir / "claude").symlink_to(admitted)
+    updated = bindir / "claude-9.9.9-real"
+    updated.write_text("#!/bin/bash\necho '9.9.9 (Claude Code)'\n")
+    updated.chmod(0o755)
+
+    real_version = claude_web._client_version
+
+    def version_then_update(binary, env):
+        got = real_version(binary, env)
+        (bindir / "claude").unlink()
+        (bindir / "claude").symlink_to(updated)  # the auto-update lands HERE
+        return got
+
+    monkeypatch.setattr(claude_web, "_client_version", version_then_update)
+    run_task()
+    command = (probe / "argv.txt").read_text()
+    assert f"'{admitted}'" in command, command
+    assert "9.9.9" not in command
+
+
+# --- D-4b parity with the codex implementation -------------------------------
+
+
+def test_both_clients_judge_the_same_targets_identically():
+    # `claude_web._check_targets` and `codex_web._check_fetch_targets` are the
+    # same rule, amended four times in slice 1. They are deliberately NOT
+    # extracted (that would touch a gated client path), so this table is what
+    # makes a one-sided amendment fail loudly. Amend BOTH.
+    from subllm.drivers import codex_web
+    from subllm.drivers.codex_trace import ParsedRollout
+
+    def resolve(host: str) -> list[str]:
+        if host == "sinkholed.test":
+            return ["127.0.0.1"]
+        if host == "nxdomain.test":
+            raise OSError("nxdomain")
+        return ["93.184.216.34"]
+
+    fetches = [
+        "https://example.com/ok",
+        "http://127.0.0.1/loopback",
+        "http://10.0.0.5/intranet",
+        "file:///etc/passwd",
+        "https://sinkholed.test/x",
+        "https://nxdomain.test/x",
+        "http://0177.0.0.1/octal",
+        "http://[::1]/v6",
+    ]
+    searches = ["https://example.com/a", "http://10.0.0.5/b",
+                "https://nxdomain.test/c"]
+
+    def verdict(call) -> str:
+        try:
+            call()
+        except IsolationError as e:
+            return f"isolation: {e}".split(":", 1)[1].strip()[:80]
+        return "ok"
+
+    for url in fetches:
+        event = TraceEvent(kind="fetch", raw_type="t", raw={}, url=url,
+                           final_url=url, ok=True)
+        claude_side = verdict(lambda: claude_web._check_targets(
+            _parsed_with([event]), resolve=resolve))
+        codex_side = verdict(lambda: codex_web._check_fetch_targets(
+            ParsedRollout(events=[event]), resolve=resolve))
+        assert claude_side == codex_side, (url, claude_side, codex_side)
+
+    for url in searches:
+        event = TraceEvent(kind="search", raw_type="t", raw={}, query="q",
+                           result_urls=(url,))
+        claude_side = verdict(lambda: claude_web._check_targets(
+            _parsed_with([event]), resolve=resolve))
+        codex_side = verdict(lambda: codex_web._check_fetch_targets(
+            ParsedRollout(events=[event]), resolve=resolve))
+        assert claude_side == codex_side, (url, claude_side, codex_side)
+
+
+def _parsed_with(events):
+    from subllm.drivers.claude_trace import ParsedTranscript
+
+    parsed = ParsedTranscript()
+    parsed.events = list(events)
+    return parsed
+
+
+def test_the_judgement_reports_a_dns_miss_as_a_retryable_client_error():
+    # The wiring, not just the rule: the CLI keys its typed error on the
+    # exception CLASS, so a delivery failure must reach it as a ClientError
+    # ("error":"client", retryable) and never as the IsolationError the README
+    # tells consumers never to retry.
+    refusal = _refusal(
+        "unresolved", "telemetry.test",
+        "host 'telemetry.test' could not be resolved (nxdomain)",
+    )
+    with pytest.raises(ClientError) as excinfo:
+        claude_web.judge_turn(
+            _turn(records(G1), [refusal]), tools="web", model=MODEL,
+            resolve=only_public,
+        )
+    assert not isinstance(excinfo.value, IsolationError)
+    assert "may be retried" in str(excinfo.value)

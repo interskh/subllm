@@ -159,6 +159,14 @@ client-independent and a port must reproduce it identically for both clients.
   (bytes decode, exotic values stringify, lone surrogates stripped, non-finite
   floats become `"nan"`/`"inf"`, `allow_nan=False`), and an ASCII-only stdout
   gets an `ensure_ascii=True` re-dump.
+- MAINTENANCE: the D-4b target rule is implemented TWICE — `codex_web`'s
+  `_check_fetch_targets` and `claude_web`'s `_check_targets`. They were kept
+  separate deliberately (extracting a shared helper would have touched an
+  already-gated client path at the end of the run), so **an amendment to one
+  must be made to the other**. A parity test runs both over one shared table of
+  targets (public, loopback literal, private literal, `file://`,
+  resolves-to-loopback, NXDOMAIN, octal spelling, IPv6 loopback) and fails when
+  their verdicts diverge; do not delete it without extracting the rule first.
 
 ## codex_web (web-agent mode, codex-cli)
 

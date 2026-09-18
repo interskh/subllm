@@ -18,7 +18,8 @@ The filter is a network-layer CONNECT filter: it terminates no TLS, reads no
 token and rewrites no request, so it is not the subscription-to-API proxy
 AGENTS.md forbids — the client talks to Anthropic itself, natively.
 
-Flags and shapes are the measured set for claude 2.1.276 (see
+Flags and shapes are the measured set for claude 2.1.276 and 2.1.277, the two
+admitted versions (the committed fixtures are 2.1.276 captures; see
 python/tests/fixtures/claude-2.1.276-*.jsonl).
 """
 from __future__ import annotations
@@ -46,7 +47,14 @@ from subllm.drivers.claude_tmux import (
     _quota_banner,
     _turn_complete,
 )
-from subllm.drivers.egress import Attempt, EgressFilterProxy, confined_argv
+from subllm.drivers.egress import (
+    CODE_PORT,
+    CODE_RESOLVED_NON_PUBLIC,
+    CODE_UNRESOLVED,
+    Attempt,
+    EgressFilterProxy,
+    confined_argv,
+)
 from subllm.errors import ClientError, IsolationError, QuotaError
 from subllm.publictargets import (
     CachingResolver,
@@ -65,8 +73,10 @@ PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 #: D-3: the tool set web-agent mode offers. `--tools ''` offers none (D-4c).
 ALLOWED_TOOLS = ("WebSearch", "WebFetch")
 
-#: D-3a, admitted-version branch: this client reports NO session-start tool
-#: inventory in the interactive transcript (surveyed across real sessions), so a
+#: D-3a, admitted-version branch: this client reports no tool inventory BEFORE
+#: the model acts — the `prompt_snapshot` attachment that names the offered
+#: tools is written with the request and can only be read afterwards (the
+#: parser checks it as a second layer), so admission is by recorded evidence: a
 #: version runs only after it has passed the live G3 negative control. A client
 #: update blocks web-agent mode until that control is re-run — which happened
 #: during this task: the client auto-updated mid-slice and the gate stopped the
@@ -109,6 +119,17 @@ _LOGIN_MARKERS = (
     "Select login method",
     "Log in with your Claude account",
     "Invalid API key",
+)
+
+#: D-3: `--safe-mode` disables the owner's customizations but its own help says
+#: "Admin-managed (policy) settings still apply", and a managed
+#: `PreToolUse` hook would run a shell inside the session with the allowlisted
+#: environment, leaving nothing the transcript parser classifies. None of these
+#: exists on this machine (measured), and if one appears the call fails closed
+#: rather than running under a policy nobody read.
+MANAGED_SETTINGS_PATHS = (
+    "/Library/Application Support/ClaudeCode/managed-settings.json",
+    "/etc/claude-code/managed-settings.json",
 )
 
 _READY_TIMEOUT_S = 60.0
@@ -187,6 +208,14 @@ def run_turn(
     if not model:
         raise ClientError("web-agent mode requires an explicit model")
 
+    _check_managed_settings()
+    # D-3a, TOCTOU: resolve the binary ONCE and run the concrete versioned
+    # executable. `claude` on PATH is a symlink the client rewrites when it
+    # auto-updates (it did so mid-development), so checking `claude --version`
+    # and then launching `claude` can admit one build and run another — and the
+    # transcript cross-check only notices after the model has acted.
+    binary = _resolve_binary()
+
     session_id = str(uuid_mod.uuid4())
     socket_name = f"subllm-web-{session_id[:8]}"
     work_dir = tempfile.mkdtemp(prefix="subllm-claude-cwd-")
@@ -196,7 +225,7 @@ def run_turn(
         _seed_config_home(
             config_dir, work_dir, credential_source or _keychain_credential
         )
-        version = _client_version(_child_env(config_dir, fake_home, None))
+        version = _client_version(binary, _child_env(config_dir, fake_home, None))
         if version not in ADMITTED_VERSIONS:
             raise ClientError(
                 f"claude web-agent mode is not admitted for client {version!r}: "
@@ -207,7 +236,7 @@ def run_turn(
 
         with EgressFilterProxy(resolve=resolve or default_resolver) as proxy:
             env = _child_env(config_dir, fake_home, proxy.proxy_url)
-            argv = _claude_argv(session_id, model, tools)
+            argv = _claude_argv(binary, session_id, model, tools)
             started = time.monotonic()
             with confined_argv(proxy.port, argv) as confined:
                 command = " ".join(_q(a) for a in confined)
@@ -406,12 +435,12 @@ def _child_env(
     return env
 
 
-def _claude_argv(session_id: str, model: str, tools: str) -> list[str]:
+def _claude_argv(binary: str, session_id: str, model: str, tools: str) -> list[str]:
     """Measured on 2.1.276. `--restricted` is NOT used: it refuses
     bypassPermissions, which D-3 keeps. `--bare` is NOT used: it never reads the
     OAuth credential, so the subscription cannot authenticate."""
     return [
-        "claude",
+        binary,
         "--session-id", session_id,
         "--permission-mode", "bypassPermissions",
         "--model", model,
@@ -423,10 +452,30 @@ def _claude_argv(session_id: str, model: str, tools: str) -> list[str]:
     ]
 
 
-def _client_version(env: dict[str, str]) -> str:
+def _resolve_binary() -> str:
+    """The concrete executable `claude` points at right now. What is version-
+    checked and what is executed must be the same file (D-3a)."""
+    found = shutil.which("claude")
+    if found is None:
+        raise ClientError("claude binary not found on PATH")
+    return os.path.realpath(found)
+
+
+def _check_managed_settings() -> None:
+    for path in MANAGED_SETTINGS_PATHS:
+        if os.path.exists(path):
+            raise ClientError(
+                f"admin-managed settings exist at {path}: they apply even under "
+                f"--safe-mode, so a managed hook could run a shell inside the "
+                f"session (D-3). Web-agent mode refuses to run until it is "
+                f"reviewed."
+            )
+
+
+def _client_version(binary: str, env: dict[str, str]) -> str:
     try:
         proc = subprocess.run(
-            ["claude", "--version"],
+            [binary, "--version"],
             env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -588,19 +637,28 @@ def _wait_for_ready(socket_name: str, timeout_s: float = _READY_TIMEOUT_S) -> No
 
 
 #: Characters that put this TUI into a different input mode instead of sending
-#: text: `!` is bash mode (a shell command) and `/` is a slash command. The
-#: prompt is caller-supplied, so this must not rest on caller discipline.
+#: text: `!` is bash mode (a shell command, MEASURED to execute locally and to
+#: be reachable through BOTH send paths) and `/` is a slash command. The prompt
+#: is caller-supplied, so this must not rest on caller discipline.
 _MODE_PREFIXES = ("!", "/")
+
+#: C0 controls and DEL, minus tab and newline. `send-keys -l` delivers these
+#: literally, so an embedded bracketed-paste sequence
+#: (`ESC [ 200 ~ !id ESC [ 201 ~`) would open bash mode from the MIDDLE of a
+#: prompt that starts with neither `!` nor `/`. Task text has no legitimate use
+#: for raw control bytes, so they are removed before anything else is decided.
+_CONTROL_BYTES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def safe_prompt(prompt: str) -> str:
-    """Prefix a single space to a prompt that would switch the TUI's input mode.
+    """Make a caller-supplied prompt safe to type into the TUI.
 
-    Precautionary: the underlying behaviour is NOT verified live here (a live
-    run was not spent on it). A leading space does not change what the task text
-    asks for, whereas refusing the prompt would fail legitimate tasks that open
-    with `!` or `/`.
-    """
+    Two rules, in order: strip control/escape bytes (which can smuggle a
+    bracketed-paste sequence and reach bash mode from mid-prompt), then prefix a
+    single space if what remains would switch input mode. Neither changes what
+    the task text asks for, whereas refusing the prompt would fail legitimate
+    tasks that open with `!` or `/`."""
+    prompt = _CONTROL_BYTES.sub("", prompt)
     return " " + prompt if prompt.startswith(_MODE_PREFIXES) else prompt
 
 
@@ -738,35 +796,39 @@ def _attempt_json(attempt: Attempt) -> dict[str, Any]:
         "allowed": attempt.allowed,
         "reason": attempt.reason,
         "connected": attempt.connected,
+        "code": attempt.code,
     }
-
-
-#: `egress.judge_target`'s wording for the port rule. Publicness is judged
-#: BEFORE the port rule there, so a port-rule refusal means the target WAS a
-#: public http/https host — it is a policy refusal (D-4b limits web-agent mode
-#: to 80/443), not evidence that a connection would have reached a non-public
-#: address, and so it is not a D-5 isolation violation. The coupling to that
-#: wording is pinned by a test that runs `judge_target` itself.
-_PORT_RULE_REASON = re.compile(r"^port \d+ is not one of ")
-
-
-def _is_port_rule_refusal(reason: str | None) -> bool:
-    return bool(reason and _PORT_RULE_REASON.match(reason))
 
 
 def _check_refusals(
     parsed: ParsedTranscript, attempts: tuple[Attempt, ...]
 ) -> None:
-    """Every destination the filter REFUSED is an isolation violation, whether
-    or not a traced fetch names its host.
+    """Judge every destination the filter REFUSED, on its machine-readable
+    `code` — never on the prose.
 
     The filter's recorded verdict is the authoritative D-4b evidence: it is what
-    the name resolved to at connection time. Skipping a refusal because the host
-    also appears in the trace — and letting `_check_targets` re-resolve it later
-    — would return an answer whenever the name moved back to a public address
-    between the fetch and the judgement (DNS rebinding, a TTL rolling to a CDN),
-    with the loopback verdict sitting unused in the raw record. D-5: the answer
-    is never returned alongside a violation.
+    the name resolved to at connection time. A refusal is NOT skipped because
+    the host also appears in the trace — letting `_check_targets` re-resolve it
+    later would return an answer whenever the name moved back to a public
+    address between the fetch and the judgement (DNS rebinding, a TTL rolling to
+    a CDN), with the loopback verdict sitting unused in the raw record (D-5).
+
+    Three outcomes:
+    - `port`: the target was already judged PUBLIC (publicness is checked before
+      the port rule), so this is web-agent mode's own 80/443 policy, not
+      evidence of a non-public destination. Not a violation.
+    - `unresolved` or `resolved_non_public` on a destination NO traced fetch
+      asked for (a client-internal call: an api.anthropic.com retry, telemetry,
+      the marketplace): the owner's own DNS decides both — a miss, or a sinkhole
+      answering 0.0.0.0 — and nothing connected. That is a delivery failure, so
+      it is a `ClientError` the caller may retry, not an `IsolationError` the
+      consumer is told never to retry.
+    - anything else (`non_public` by LITERAL, `scheme`, `unparsable`, `missing`,
+      or a code this driver does not know): `IsolationError` whether traced or
+      not — nothing legitimate dials a private address literal through this
+      filter, so it is evidence of a hidden tool or client behaviour.
+    - a TRACED fetch keeps `IsolationError` for every non-port code, including
+      both non-public forms: that is the D-4b case and does not soften.
     """
     traced = {
         h
@@ -776,11 +838,22 @@ def _check_refusals(
         if h
     }
     for attempt in attempts:
-        if attempt.allowed or _is_port_rule_refusal(attempt.reason):
+        if attempt.allowed or attempt.code == CODE_PORT:
             continue
         host = (attempt.host or "").strip().rstrip(".").lower()
+        asked_for = host in traced
+        if not asked_for and attempt.code in (
+            CODE_UNRESOLVED, CODE_RESOLVED_NON_PUBLIC
+        ):
+            raise ClientError(
+                f"the egress filter refused the client-internal request "
+                f"{attempt.target!r} [{attempt.code}] ({attempt.reason}); the "
+                f"verdict came from name resolution on this machine and no "
+                f"traced fetch asked for it, so this is a delivery failure, "
+                f"not an isolation violation — the call may be retried"
+            )
         events = list(parsed.events)
-        if host in traced:
+        if asked_for:
             whose = "which a traced fetch asked for"
         else:
             whose = "which no traced fetch asked for"
@@ -794,7 +867,7 @@ def _check_refusals(
             )
         raise IsolationError(
             f"the egress filter refused {attempt.target!r} "
-            f"({attempt.reason}), {whose}",
+            f"[{attempt.code}] ({attempt.reason}), {whose}",
             events,
         )
 

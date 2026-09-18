@@ -19,6 +19,15 @@ from typing import Any, Iterable, Literal
 
 from subllm.webagent import TraceEvent
 
+#: Interactive BASH MODE tags. MEASURED in the isolated home (no model turn, so
+#: no quota): a `!`-prefixed input executes a shell command locally and records
+#: `<bash-input>…</bash-input>` then
+#: `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>` as ordinary `user`
+#: string content — which the parser would otherwise read as "the prompt". Local
+#: command execution is exactly D-5's case, so it is a violation here, and the
+#: guarantee no longer rests on the send-time mitigation alone.
+_BASH_MODE_TAGS = ("<bash-input>", "<bash-stdout>", "<bash-stderr>")
+
 #: The tools web-agent mode may offer (D-3). Any other tool_use name — or ANY
 #: tool_use at all under tools='none' (D-4c) — is a violation.
 WEB_TOOLS = frozenset({"WebFetch", "WebSearch"})
@@ -271,7 +280,16 @@ def _user(
     message = message if isinstance(message, dict) else {}
     content = message.get("content")
     if isinstance(content, str):
-        return  # the prompt
+        tag = next((t for t in _BASH_MODE_TAGS if t in content), None)
+        if tag is not None:
+            out.violations.append(
+                f"interactive bash mode ran a local command ({tag} in a user "
+                f"record)"
+            )
+            out.events.append(
+                TraceEvent(kind="other", raw_type="bash-mode", raw=record)
+            )
+        return  # otherwise: the prompt
     if not isinstance(content, list):
         _unknown(out, "user record with no readable content", record)
         return

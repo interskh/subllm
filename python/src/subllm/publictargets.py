@@ -48,6 +48,23 @@ def _address_reason(text: str) -> str | None:
     return f"{text} is not a public address"
 
 
+#: Machine-readable reason codes. Callers must not classify the prose: a
+#: consumer that needs to treat "the name did not resolve" differently from
+#: "the address is not public" (a transient DNS miss is a delivery failure, not
+#: an isolation violation) reads the code.
+CODE_MISSING = "missing"
+CODE_SCHEME = "scheme"
+#: Non-public BY INSPECTION: the URL itself names a private/loopback/reserved
+#: address, an alternate IP spelling, or a loopback name.
+CODE_NON_PUBLIC = "non_public"
+#: Non-public BY RESOLUTION: an ordinary-looking name whose addresses are not
+#: public. Split from the above because the two carry different evidence — a
+#: sinkhole (Pi-hole answering 0.0.0.0) makes an innocent name resolve
+#: non-public, while nothing legitimate dials a private literal.
+CODE_RESOLVED_NON_PUBLIC = "resolved_non_public"
+CODE_UNRESOLVED = "unresolved"
+
+
 def classify_url(
     url: str | None,
     *,
@@ -60,50 +77,72 @@ def classify_url(
     `unresolved_is_public` relaxes ONLY the "name did not resolve" branch, for
     callers judging a target nothing connected to (a search result). Everything
     judged non-public by inspection still fails."""
+    return classify_url_detail(
+        url, resolve=resolve, unresolved_is_public=unresolved_is_public
+    )[0]
+
+
+def classify_url_detail(
+    url: str | None,
+    *,
+    resolve: Resolver = default_resolver,
+    unresolved_is_public: bool = False,
+) -> tuple[str | None, str | None]:
+    """`classify_url` plus the machine-readable code for the reason."""
     if not url:
-        return "missing URL"
+        return "missing URL", CODE_MISSING
     parts = urlsplit(url)
     if parts.scheme.lower() not in _PUBLIC_SCHEMES:
-        return f"scheme {parts.scheme or '(none)'!r} is not http/https: {url!r}"
+        return (
+            f"scheme {parts.scheme or '(none)'!r} is not http/https: {url!r}",
+            CODE_SCHEME,
+        )
     host = (parts.hostname or "").strip().rstrip(".").lower()
     if not host:
-        return f"no host in {url!r}"
+        return f"no host in {url!r}", CODE_MISSING
     # A host that is an IP literal is judged directly; ipaddress.is_global is
     # false for loopback, private, link-local, unspecified, multicast and the
     # other reserved ranges, which is exactly the class D-4b names.
     literal = _address_reason(host)
     if literal is not None:
-        return f"{literal}: {url!r}"
+        return f"{literal}: {url!r}", CODE_NON_PUBLIC
     try:
         ipaddress.ip_address(host)
     except ValueError:
         pass
     else:
-        return None  # public literal
+        return None, None  # public literal
     # A numeric host that `ipaddress` rejects is an alternate IP spelling
     # (octal `0177.0.0.1`, hex `0x7f000001`, the bare integer form). getaddrinfo
     # resolves those platform-dependently — macOS reads `0177.0.0.1` as
     # 177.0.0.1, which looks public — so they are refused, not resolved.
     if _NUMERIC_HOST.fullmatch(host):
-        return f"host {host!r} is a non-decimal IP spelling: {url!r}"
+        return (
+            f"host {host!r} is a non-decimal IP spelling: {url!r}",
+            CODE_NON_PUBLIC,
+        )
     if host == "localhost" or host.endswith(".localhost"):
-        return f"host {host!r} is loopback: {url!r}"
+        return f"host {host!r} is loopback: {url!r}", CODE_NON_PUBLIC
     try:
         addresses = resolve(host)
     except Exception as e:  # noqa: BLE001 — any resolution failure fails closed
         if unresolved_is_public:
-            return None
-        return f"host {host!r} could not be resolved ({e}): {url!r}"
+            return None, None
+        return (
+            f"host {host!r} could not be resolved ({e}): {url!r}",
+            CODE_UNRESOLVED,
+        )
     if not addresses:
         if unresolved_is_public:
-            return None
-        return f"host {host!r} resolved to nothing: {url!r}"
+            return None, None
+        return f"host {host!r} resolved to nothing: {url!r}", CODE_UNRESOLVED
     for text in addresses:
         if _address_reason(text) is not None:
             return (
-                f"host {host!r} resolves to non-public address {text}: {url!r}"
+                f"host {host!r} resolves to non-public address {text}: {url!r}",
+                CODE_RESOLVED_NON_PUBLIC,
             )
-    return None
+    return None, None
 
 
 class CachingResolver:

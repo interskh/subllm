@@ -34,11 +34,21 @@ from urllib.parse import urlsplit, urlunsplit
 
 from subllm.errors import ClientError
 from subllm.publictargets import (
+    CODE_NON_PUBLIC,
+    CODE_RESOLVED_NON_PUBLIC,
+    CODE_UNRESOLVED,
     CachingResolver,
     Resolver,
-    classify_url,
+    classify_url_detail,
     default_resolver,
 )
+
+#: Re-exported so a consumer judging an Attempt imports every code from here.
+RESOLVED_NON_PUBLIC = CODE_RESOLVED_NON_PUBLIC
+
+#: Reason codes this module adds on top of `publictargets`' own.
+CODE_PORT = "port"
+CODE_UNPARSABLE = "unparsable"
 
 #: D-4b judges public http/https targets; nothing else needs another port, and
 #: a wider rule would let a confined client reach a service on a public address
@@ -79,6 +89,11 @@ class Attempt:
     #: alone would read the same for a refused-nothing 502, and the log is the
     #: G3 evidence: "we permitted it" and "we connected" must be separable.
     connected: bool = False
+    #: Machine-readable reason for a refusal: `non_public | unresolved | port |
+    #: scheme | unparsable | missing`, None when allowed. A consumer must judge
+    #: on this, never on the prose — a transient DNS miss (`unresolved`) is a
+    #: delivery failure, while `non_public` is an isolation violation.
+    code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +102,7 @@ class _Verdict:
     port: int | None
     address: str | None
     reason: str | None
+    code: str | None = None
     #: every address the check validated, in resolution order. All passed the
     #: same check, so trying them in turn does not widen the guard — it only
     #: keeps a dual-stack name working when one family has no route.
@@ -131,14 +147,14 @@ def judge_target(
         parts = urlsplit(url)
         _ = parts.hostname, parts.port
     except ValueError as e:
-        return _Verdict(None, None, None, f"unparsable target ({e}): {url!r}")
+        return _Verdict(None, None, None, f"unparsable target ({e}): {url!r}", CODE_UNPARSABLE)
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
-        return _Verdict(None, None, None, f"scheme {parts.scheme or '(none)'!r} is not http/https: {url!r}")
+        return _Verdict(None, None, None, f"scheme {parts.scheme or '(none)'!r} is not http/https: {url!r}", "scheme")
     try:
         port = parts.port
     except ValueError:
-        return _Verdict(parts.hostname, None, None, f"invalid port in {url!r}")
+        return _Verdict(parts.hostname, None, None, f"invalid port in {url!r}", CODE_UNPARSABLE)
     if port is None:
         port = 443 if scheme == "https" else 80
     # Publicness is judged BEFORE the port rule: the live G3 control fetches a
@@ -146,16 +162,16 @@ def judge_target(
     # the recorded reason must name the loopback resolution, not the port. The
     # cost is one resolution for a target the port rule then refuses anyway.
     recorder = _OneShotResolver(resolve)
-    reason = classify_url(url, resolve=recorder)
+    reason, code = classify_url_detail(url, resolve=recorder)
     if reason is not None:
-        return _Verdict(parts.hostname, port, None, reason)
+        return _Verdict(parts.hostname, port, None, reason, code or CODE_NON_PUBLIC)
     if port not in tuple(allowed_ports):
-        return _Verdict(parts.hostname, port, None, f"port {port} is not one of {tuple(allowed_ports)}: {url!r}")
+        return _Verdict(parts.hostname, port, None, f"port {port} is not one of {tuple(allowed_ports)}: {url!r}", CODE_PORT)
     # A literal host never reaches the resolver; it is its own validated address.
     validated = tuple(recorder.addresses) or ((parts.hostname,) if parts.hostname else ())
     if not validated:
-        return _Verdict(parts.hostname, port, None, f"no address for {url!r}")
-    return _Verdict(parts.hostname, port, validated[0], None, validated)
+        return _Verdict(parts.hostname, port, None, f"no address for {url!r}", CODE_UNRESOLVED)
+    return _Verdict(parts.hostname, port, validated[0], None, None, validated)
 
 
 def _connect_url(authority: str) -> str | None:
@@ -269,20 +285,20 @@ class _Handler(socketserver.BaseRequestHandler):
             try:
                 head, rest = _read_head(conn)
             except _BadRequest as e:
-                proxy._record(Attempt(time.time(), "?", "", None, None, None, False, str(e)))
+                proxy._record(Attempt(time.time(), "?", "", None, None, None, False, str(e), code=CODE_UNPARSABLE))
                 _reply(conn, 400, str(e))
                 return
             line = head.split(b"\r\n", 1)[0].decode("latin-1")
             bits = line.split()
             if len(bits) != 3:
-                proxy._record(Attempt(time.time(), "?", line[:200], None, None, None, False, "malformed request line"))
+                proxy._record(Attempt(time.time(), "?", line[:200], None, None, None, False, "malformed request line", code=CODE_UNPARSABLE))
                 _reply(conn, 400, "malformed request line")
                 return
             method, target, version = bits[0].upper(), bits[1], bits[2]
             if method == "CONNECT":
                 url = _connect_url(target)
                 if url is None:
-                    proxy._record(Attempt(time.time(), method, target, None, None, None, False, "malformed CONNECT authority"))
+                    proxy._record(Attempt(time.time(), method, target, None, None, None, False, "malformed CONNECT authority", code=CODE_UNPARSABLE))
                     _reply(conn, 400, "malformed CONNECT authority")
                     return
             else:
@@ -290,7 +306,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 # may trust (routing it off `Host` would judge a name the client
                 # chose, not the destination), so it is refused.
                 if "://" not in target:
-                    proxy._record(Attempt(time.time(), method, target, None, None, None, False, "request target is not an absolute URI"))
+                    proxy._record(Attempt(time.time(), method, target, None, None, None, False, "request target is not an absolute URI", code=CODE_UNPARSABLE))
                     _reply(conn, 400, "request target is not an absolute URI")
                     return
                 url = target
@@ -305,6 +321,7 @@ class _Handler(socketserver.BaseRequestHandler):
                     address=verdict.address,
                     allowed=verdict.reason is None,
                     reason=verdict.reason,
+            code=verdict.code,
                 )
             )
             if verdict.reason is not None:
