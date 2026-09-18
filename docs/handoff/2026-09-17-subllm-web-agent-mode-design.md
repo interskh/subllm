@@ -142,3 +142,104 @@ Design doc: `docs/superpowers/specs/2026-09-17-subllm-web-agent-mode-design.md`.
 - Closing-round mutation battery: 3/3 caught (exemption extended to string literals in any position → both bypass tests fail; exemption removed → the URL/MDN tests fail; unresolvable ref_id tolerated when a final URL exists → the `ref_id:"constructor"` test fails). The first attempt at the any-position mutant survived because it only widened the KEY name, not the position — rewritten to mask every literal, it is caught.
 
 implement-loop: slice 1 shipped cf4d2c8; remaining: [2]
+
+---
+
+# Slice 2 — Claude web agent (D-3, D-3a, D-4b, D-4c, D-6) + docs
+
+## Slice-2 preflight (orchestrator, measured 2026-09-19, claude 2.1.276 / tmux 3.6a)
+
+Probes run before any code, because two of them are the slice's prerequisite gates.
+
+- **Auth from a dedicated configuration home: PASSES, via a copied credential, not the keychain.**
+  The macOS keychain item is namespaced per config home (`Claude Code-credentials` for the
+  default home, `Claude Code-credentials-<hash8>` for others), so a fresh `CLAUDE_CONFIG_DIR`
+  reports `Not logged in · Run /login` (measured). Writing `$CFG/.credentials.json` from the
+  owner's keychain item authenticates and runs a real turn (measured: WebFetch of
+  `https://example.com`, `Received 559 bytes (200 OK)`, answer "Example Domain"). **Copy only
+  `claudeAiOauth`** — the keychain blob also holds `mcpOAuth` server tokens (supabase client
+  secrets here), which an auth-only home must not carry (D-3).
+- **Onboarding/trust seeding is required.** A fresh home shows the theme wizard, and the
+  workspace-trust dialog ("Quick safety check: Is this a project you created or one you
+  trust?", default option `No, exit`) — the existing driver's `_TRUST_DIALOG_MARKER` does not
+  match this wording and its `1`+Enter would pick "No, exit". Seeding `$CFG/.claude.json` with
+  `hasCompletedOnboarding`, `theme`, `bypassPermissionsModeAccepted` and a `projects` entry
+  keyed by the **resolved** work dir (`/private/tmp/...`, not `/tmp/...`) skips both.
+- **Flags accepted on 2.1.276:** `--safe-mode --permission-mode bypassPermissions --tools
+  'WebSearch,WebFetch' --strict-mcp-config --disable-slash-commands --session-id --model`.
+  `--restricted` is NOT usable (it refuses bypassPermissions, D-3 keeps it); `--bare` is NOT
+  usable (it never reads OAuth, so the Max plan cannot authenticate). No managed-settings
+  directory exists on this machine (`/Library/Application Support/ClaudeCode/` absent).
+- **D-4b pre-connection enforcement: a mechanism EXISTS and was demonstrated.**
+  `sandbox-exec` works on Darwin 25.5. With `(allow default)(deny network*)` plus
+  `(allow network-outbound (remote unix-socket))` and one `(remote ip "localhost:<proxy>")`,
+  a confined process reaches the public web only through that port: direct egress fails,
+  and a loopback server on a *different* port is unreachable (measured with curl).
+  Under that confinement the real client routed **every** connection through the proxy —
+  `api.anthropic.com`, `downloads.claude.ai`, telemetry, and the WebFetch of
+  `example.com` — so the proxy is a complete egress chokepoint and can judge each
+  destination before connecting. Measured detail: WebFetch of `http://127.0.0.1:<port>/`
+  arrives as `CONNECT 127.0.0.1:<port>` (the client upgrades http→https), i.e. the
+  filter sees it and can refuse it before any connection.
+- **No session-start tool inventory exists in the interactive transcript** (record types
+  surveyed across real sessions): D-3a therefore takes its second branch for Claude — an
+  admitted-version record — with the transcript's `attachment/deferred_tools_delta`,
+  `skill_listing`, `mcp_instructions_delta`, `agent_listing_delta` records used as positive
+  *negative* signals.
+- **WebFetch exposes structured results.** The tool-result `user` record carries
+  `toolUseResult = {bytes, code, codeText, result, durationMs, url}` — a status code and a
+  URL — alongside the `tool_use` block's `input.url`. Whether `url` is the post-redirect URL
+  is what the slice's redirect capture must decide.
+- **Operational caveat for the owner:** the copied OAuth credential is refreshed by the child
+  when it nears expiry (the probe warned "Your login expires in 1 day"). If the vendor rotates
+  refresh tokens, a web-agent call could invalidate the owner's own login. A one-time `/login`
+  into a fixed dedicated home would avoid sharing the credential at all.
+
+## T1a — egress filter + sandbox-exec confinement (D-4b)
+
+### Decisions
+- New `python/src/subllm/drivers/egress.py`; no slice-1 file touched. `classify_url` is reused as-is (no second classifier).
+- Check order is **scheme → `classify_url` → port**, not port first: the live G3 control uses `http://127.0.0.1.nip.io:<unprivileged>/`, and a port-first rule would report every such refusal as "port not allowed" and never prove the resolves-to-loopback rule. Cost: one resolution for a target the port rule then refuses.
+- The validated address is captured by wrapping the resolver per request (`_OneShotResolver` over `CachingResolver`), not by reading a cache dict — `classify_url` lowercases/strips the host, so a raw-host key would miss. Guarantees exactly one `resolve()` per request; an IP-literal host (resolver never called) is its own address.
+- Ports restricted to 80/443 (`ALLOWED_PORTS`). D-4b judges public **web** targets; a wider rule would let the confined client reach SSH/DB/mail on a public address.
+- `connect` is an injected callable (default `socket.create_connection((address, port))`). It is the tests' only path to the origin server, which is what makes "the origin recorded ZERO requests" a real pre-connection assertion — and T1b can leave it at the default.
+- Origin-form requests (`GET /x` + `Host:`) are **refused 400**, never routed off `Host`: that name was chosen by the client and never validated.
+- CONNECT authority is refused if it contains `/ ? # @`; the synthesized URL keeps IPv6 brackets. Bytes buffered past the header block are forwarded to upstream after connecting (otherwise TLS garbage).
+- `sandbox_exec` is hardcoded `/usr/bin/sandbox-exec`, never `shutil.which` (PATH injection would defeat the boundary; `conftest.fake_bin` prepends PATH). Missing binary or unwritable profile → `ClientError` (fail closed, no unconfined fallback).
+- Profile text is the orchestrator's measured-good text verbatim, parameterized only by port; `sandbox_profile` rejects a non-int/out-of-range port (a string could smuggle `*`).
+- `stop()`: `shutdown()` → close every tracked socket → `server_close()` → join workers. Header read has a 15 s timeout and a 64 KB cap so a silent client cannot pin a thread.
+
+### Rejected
+- **Resolving inside the proxy and passing addresses to a second checker** — forks the D-4b judgement; the wrapper keeps one classifier authoritative.
+- **TLS interception** to inspect redirect hops — the spec says no MITM; each redirect hop is a fresh CONNECT/absolute-URI and is judged on its own.
+- **Allowing an arbitrary test port through `allowed_ports`** in tests — it would make the port rule non-load-bearing; the injected connector gives the same hermeticity without relaxing a contract.
+- **`socket.create_connection((host, port))` with the name** — the TOCTOU hole the task names; mutation M2 confirms the test catches it.
+- **Daemon threads only, no join** — "no leaked threads after stop" would be unprovable; `live_thread_count()` is asserted 0.
+
+### Assumptions
+- **Why the module is load-bearing (orchestrator's live rehearsal, quoted):** with a NON-filtering tunnel proxy the real client issued `CONNECT 127.0.0.1.nip.io:18762` and the loopback server received it. The client self-refuses `file://` ("Invalid URL") and bare `localhost` ("cannot fetch localhost … without a dot") but NOT a public-looking name that resolves to loopback — that is exactly the case this filter closes, and the hermetic tests prove it with a zero-request assertion on the origin.
+- Judgement is **per connection setup**, not per pipelined request: after an allowed CONNECT/absolute-URI the socket is already bound to that validated IP, so a second request on it cannot reach a new destination. Check by pipelining a second absolute-URI on one keep-alive socket (the filter forces `Connection: close` upstream on the plain path).
+- `93.184.216.34` is used in tests purely as a public-looking literal; nothing dials it (injected connector).
+- The measured profile's unix-socket rules are what keep DNS/IPC alive under `deny network*` (orchestrator's measurement, not re-derived).
+
+### Deferred
+- The Claude driver, transcript parser and any live test — T1b, by task split.
+- Wiring `EgressFilterProxy` into a client: nothing imports this module yet, so it cannot regress slice 1.
+- Per-call URL allow/deny lists (§7) and response metadata.
+
+### Touches
+- New: `python/src/subllm/drivers/egress.py`, `python/tests/test_egress.py`. No shared-surface change: `publictargets.py`, `webagent.py`, `codex_web.py`, `codex_trace.py`, `cli.py`, `pyproject.toml` untouched (no new marker — the E2E confinement test runs in 0.56 s and is `skipif`-guarded on `sandbox-exec`/`curl`).
+- **T1b wiring:** point the child at the filter with `HTTP_PROXY`/`HTTPS_PROXY` = `proxy.proxy_url` (add both to the D-6 env allowlist) and do NOT forward the caller's `NO_PROXY`/`no_proxy`. Under the real client every attempt arrives as `CONNECT host:port`, so `Attempt.method == "CONNECT"` and `Attempt.target` is `host:port`, not a URL. A validated name with several addresses is tried in resolution order (all passed the same check), so a 502 in a live run means every validated address was unreachable, not a refusal — refusals are 403 and always appear in `.attempts`.
+- API for T1b: `EgressFilterProxy(resolve=…, connect=…, allowed_ports=…)` as a context manager, `.port`, `.proxy_url`, `.attempts -> tuple[Attempt, …]`, `.refusals`, `.live_thread_count()`; `Attempt(at, method, target, host, port, address, allowed, reason)` (frozen — field names are the G3 evidence contract); `confined_argv(port, command) -> argv` context manager; `sandbox_profile(port)`, `sandbox_argv(...)`, `judge_target(url, …)`.
+- Test evidence: `cd python && uv run pytest tests/test_egress.py -q` → 29 passed (8.2 s); full suite 270 passed, 8 skipped. Mutation battery 6/6 caught: pre-connection check removed, dial the name instead of the validated address, port rule widened, deny-all dropped from the profile, refusals unlogged, CONNECT's buffered bytes dropped.
+
+### T1a fix round (blind-reviewer findings)
+
+- **`judge_target` is total.** `GET http://[good.test]/`, `GET http://[::1/x`, `CONNECT [::1:443` made `urlsplit` raise inside the handler: nothing connected, but the client got an empty response and the attempt log held NO entry — a hole in the G3 evidence for exactly the inputs a hostile page can induce. Any parse failure now returns a refusing `_Verdict` ("unparsable target …"), recorded then refused.
+- **`Attempt` gains `connected: bool`** (final field list: `at, method, target, host, port, address, allowed, reason, connected`). `allowed=True` alone read the same for a real connection and for a 502 where nothing was reached; T1b must ground G3 on `allowed and connected`. It is set by replacing the logged entry only after `_connect` returns.
+- **Idle-bounded pump.** `EgressFilterProxy(idle_timeout_s=…)`, default 180 s: a connection with no traffic either way for that long is abandoned, so a hung upstream cannot pin a handler thread and its sockets for the session. Tested with `idle_timeout_s=0.5` against a listener that never answers.
+- **A profile that fails mid-write is unlinked** before the `ClientError`, so no half-written description of the boundary is left in the temp dir.
+- **Claim corrected, rule unchanged (reviewer demonstrated it).** Under this profile a confined process can still reach ANY unix socket (`curl --unix-socket` returned a local service's body) and can still resolve names. The property the profile actually gives is: **the only reachable TCP network destination is the filter's port.** Unix-domain sockets and name resolution stay available because the client's own IPC and DNS need them — so the profile is NOT what confines the model; the proven tool set (D-3a) is, and the model is offered no tool that can speak to a unix socket. The module docstring now states this. The profile is deliberately neither widened nor narrowed.
+- **Deferred, not fixed:** `stop()` during an in-flight upstream connect can leave one handler alive up to the connect timeout past the join. It holds no listening socket and cannot accept new work; a bounded connect timeout already caps it.
+- Fix-round mutation battery: 4/4 caught (judge_target raising again, `connected` marked before connecting, idle bound removed, profile unlink dropped). Earlier battery 6/6 still applies.
+- Test evidence after the fix round: `cd python && uv run pytest tests/test_egress.py -q` → 37 passed (12.6 s); full suite 278 passed, 8 skipped.
