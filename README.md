@@ -30,6 +30,11 @@ verified end-to-end against live subscriptions.
   in the wrong region (e.g. VPN dropped). Whitelist (`allowed_regions`) or
   blacklist (`blocked_regions`) mode; off by default.
 - **`DryRunLLM`** — a no-op client that records prompts, for your own tests.
+- **Web-agent mode** — one isolated browsing turn per call on either client,
+  returning the answer *plus a trace* of what was searched and which pages were
+  actually retrieved, so a consumer can ground an answer instead of trusting it.
+  The agent is offered web search and web fetch and nothing else; any other tool
+  event fails the call loudly.
 
 ## Layout
 
@@ -37,17 +42,24 @@ verified end-to-end against live subscriptions.
 subllm/
   python/                # Python library (CodexLLM + ClaudeLLM + FallbackLLM + CLI)
     src/subllm/
-      __init__.py          # public exports (the 11 names below)
+      __init__.py          # public exports (the 14 names below)
       base.py              # BaseLLM ABC + transient _retry + DryRunLLM
-      errors.py            # SubllmError / QuotaError / ClientError / OutputError / RegionError
+      errors.py            # SubllmError / QuotaError / ClientError / OutputError / RegionError / IsolationError
       preflight.py         # RegionGuard (optional region/IP check)
       codex.py             # CodexLLM  (primary)
       claude.py            # ClaudeLLM (fallback)
       fallback.py          # FallbackLLM(primary, *fallbacks, on=(QuotaError,))
-      cli.py               # minimal CLI: subllm complete / complete-json
+      webagent.py          # TraceEvent / WebAgentResult (the web-agent trace contract)
+      publictargets.py     # "is this a public web target?" (resolution-aware)
+      cli.py               # minimal CLI: subllm complete / complete-json / web-agent
       drivers/
         codex_exec.py      # contract for `codex exec`
         claude_tmux.py     # tmux driver for interactive `claude`
+        codex_web.py       # web-agent mode for codex (isolation + admission)
+        codex_trace.py     # codex rollout -> trace, isolation checks
+        claude_web.py      # web-agent mode for claude (isolation + admission)
+        claude_trace.py    # claude transcript -> trace, isolation checks
+        egress.py          # pre-connection egress filter + sandbox-exec confinement
     tests/
     pyproject.toml
   ts/                    # TypeScript SDK (CodexLLM, phase 1)
@@ -74,6 +86,16 @@ subllm/
   (verified on codex-cli 0.133.0 and 0.136.0).
 - For `ClaudeLLM`: **`tmux`** and the **`claude`** CLI on `PATH`, logged in to a
   Claude Pro/Max subscription.
+- For **web-agent mode**, additionally:
+  - `codex`: an admitted **(client version, model)** pair — currently only
+    codex-cli `0.154.0` with `gpt-5.6-luna`.
+  - `claude`: an admitted **client version** (currently `2.1.276` / `2.1.277`),
+    `tmux`, a `claude` logged in **from the default config home** (the
+    credential is read from the keychain item `Claude Code-credentials`; a login
+    made under a custom `CLAUDE_CONFIG_DIR` is stored under a different,
+    namespaced item and will not be found), and **macOS `sandbox-exec`** at `/usr/bin/sandbox-exec` — the
+    call fails closed without it, never running unconfined.
+  - `SUBLLM_LIVE=1` to run the opt-in live web-agent suite.
 
 ## Install
 
@@ -173,6 +195,86 @@ data = CodexLLM(...).complete_json_schema("Summarize this thread: ...", Summary)
 # returned dict is guaranteed to satisfy `Summary`.
 ```
 
+### Web-agent mode (browse the public web, with a trace)
+
+One isolated browsing turn per call, on either client. The agent is offered web
+search and web fetch only; it gets a throwaway client configuration home, an
+empty `HOME` and working directory, and an environment allowlist, so nothing of
+your setup or your secrets enters the session.
+
+```python
+from subllm import CodexLLM, ClaudeLLM, IsolationError
+
+llm = CodexLLM(model="gpt-5.6-luna")                      # or
+llm = ClaudeLLM(model="claude-haiku-4-5-20251001")
+
+result = llm.run_web_task(
+    "Open https://example.com and give its title.",
+    tools="web",        # or "none": same isolation, no tools at all (for grading
+                        # untrusted text); any tool event is then a violation
+    timeout_s=300,
+)
+print(result.answer, result.retrieved_urls)
+```
+
+`run_web_task` **ignores the `codex_home` constructor argument**: it always
+builds a throwaway home, copying `auth.json` from `$CODEX_HOME` (or `~/.codex`)
+into it. For claude it reads the OAuth credential from the macOS keychain.
+
+`run_web_task(prompt, schema_model=None, *, tools="web", timeout_s=300)` also
+takes a Pydantic model, exactly like `complete_json_schema`, and then returns a
+validated `dict` as `answer`.
+
+`WebAgentResult` fields, and what each means when you ground an answer:
+
+| Field | Meaning |
+|---|---|
+| `answer` | `str`, or `dict` when a `schema_model` was given |
+| `trace` | ordered `TraceEvent`s: `kind` is `search` / `fetch` / `other`, with `query` + `result_urls` on a search, `url` (requested) + `final_url` (after redirects) + `ok` on a fetch, and the client's untouched record in `raw` |
+| `retrieved_urls` | the `final_url` of every *successful* fetch, deduplicated, first-seen order. **Ground against this list only** — search results are not retrieved pages, and URLs the answer cites are not evidence |
+| `fetch_events_exposed` | `False` → `retrieved_urls` is empty *by construction* |
+| `trace_complete` | `False` → `retrieved_urls` is empty *by construction*: some evidence was unpaired, truncated or unrecognised |
+| `tools` | `"web"` or `"none"`, as requested |
+| `client`, `model`, `client_version`, `duration_ms` | what produced the trace |
+
+Three things a consumer must handle:
+
+- **URLs are the client's own spelling and are never rewritten.** For the same
+  page codex reports `https://example.com/` and claude reports
+  `https://example.com`. The trace *shape* is uniform across clients; the URL
+  text is not. **Normalize before comparing.**
+- **`trace_complete=False` or `fetch_events_exposed=False` is a delivery
+  failure, not an ungrounded answer.** The retrieved list is empty because the
+  evidence is untrustworthy — re-run rather than scoring it.
+- **`IsolationError` is a hard stop.** It carries `.trace` and never the answer,
+  it is never a `FallbackLLM` trigger, and it should not be one for you either.
+
+Web-agent calls make **one attempt and never retry** (unlike the text methods): a
+silent re-run would return a different browsing session than the one you timed.
+
+Known limits, stated as limits:
+
+- **codex:** the fetch runs on OpenAI's servers, so the public-target check is
+  *after the fact and approximate* — subllm cannot block that connection, only
+  refuse to return an answer that involved a non-public target. Its isolation
+  scan of the client's exec scripts is a token scanner, **not a JS parser**.
+- **claude:** every connection the confined client made arrived at subllm's
+  filter as a `CONNECT` (measured on 2.1.276/2.1.277), so a fetch target is
+  judged *before* connecting; the after-the-fact target check still runs on
+  every traced fetch regardless. `final_url` is exact at
+  **host** granularity — a same-host path redirect can be followed silently. The
+  sandbox profile bounds **TCP destinations only** (unix sockets and DNS remain);
+  it is not a filesystem sandbox.
+- **Both:** a timeout discards the transcript unjudged, so a timed-out call
+  yields no trace.
+- **claude, operational:** the call copies your OAuth credential into the
+  throwaway config home and the child may refresh it, so if the vendor rotates
+  refresh tokens this could affect your own login. A one-time `/login` into a
+  fixed dedicated home would avoid sharing it.
+- **Both:** a client auto-update **blocks web-agent mode** until the live
+  negative control is re-run and the new version is admitted. This is by design
+  (a new version's tool set is unproven) and it has already fired once.
+
 ### Region preflight (optional)
 
 ```python
@@ -209,14 +311,58 @@ A minimal CLI for smoke-testing and shell-out from non-Python projects:
 ```bash
 subllm complete       --client codex|claude  [--model M] [--effort E] [PROMPT]
 subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
+subllm web-agent      --client codex|claude  --model M [--tools web|none]
+                      [--schema schema.json] [--timeout S] [PROMPT]
 ```
 
-`PROMPT` comes from the argument or stdin (`-`). Result goes to stdout; errors to
-stderr with a non-zero exit code. Example:
+`PROMPT` comes from the argument or stdin (`-`). For `complete` /
+`complete-json` the result goes to stdout and errors to stderr with a non-zero
+exit code. Example:
 
 ```bash
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
+
+### `web-agent` (machine-facing)
+
+`web-agent` is the entry point for non-Python consumers: **one JSON document on
+stdout, success or failure** — never parse stderr.
+
+```bash
+subllm web-agent --client codex  --model gpt-5.6-luna \
+  "Open https://example.com and give its title."
+subllm web-agent --client claude --model claude-haiku-4-5-20251001 "…"
+```
+
+Success, exit 0:
+
+```json
+{"client":"codex","model":"…","tools":"web","answer":"…",
+ "trace":[{"kind":"search","query":"…","result_urls":[],"raw_type":"…","raw":{}},
+          {"kind":"fetch","url":"https://…","final_url":"https://…","ok":true,
+           "raw_type":"…","raw":{}}],
+ "retrieved_urls":["https://…"],"fetch_events_exposed":true,"trace_complete":true,
+ "client_version":"…","duration_ms":12345}
+```
+
+Failure, non-zero exit, still on stdout:
+
+```json
+{"error":"quota"|"client"|"output"|"isolation"|"region","message":"…",
+ "trace":[…] | null}
+```
+
+`trace` is non-null **only** for `"isolation"`.
+
+> **`--schema` on the CLI is not content validation.** The file is bound
+> natively by codex (`--output-schema`); claude has no such binding and is only
+> prompt-instructed, and in both cases subllm itself checks only that the answer
+> is a JSON object. For enforced validation, call `run_web_task` from Python
+> with a real Pydantic model.
+
+A bad `--schema` file is
+reported as `"client"` on stdout; argparse-level errors (unknown flag, bad
+`--client`) stay argparse's own exit 2 on stderr.
 
 ## Testing
 
@@ -225,8 +371,12 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # 56 tests, no subscription, no network
+uv run pytest                 # no subscription, no network (341 passed, 10 skipped)
 ```
+
+The web-agent parsers are tested the same way: their fixtures are **sanitized
+recordings of real runs** (`tests/fixtures/codex-0.154.0-*.jsonl`,
+`claude-2.1.276-*.jsonl`), committed with the client version that produced them.
 
 A separate **opt-in live suite** drives the real subscriptions to confirm both
 clients work end-to-end. It is skipped unless `SUBLLM_LIVE=1` is set (so CI and a
@@ -241,6 +391,17 @@ SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
 
 Requires `codex` logged in to a ChatGPT plan; the claude tests additionally need
 `claude` (logged in to Pro/Max) and `tmux`.
+
+A second opt-in live suite covers **web-agent mode** — per client, a grounded
+browsing turn (G1) and a negative control (G3) that tries to read a canary file,
+a loopback address and a public-looking name that resolves to loopback, and
+asserts none of it reaches the answer:
+
+```bash
+SUBLLM_LIVE=1 uv run pytest -m integration -k web_agent -v
+```
+
+The claude half additionally needs macOS `sandbox-exec`.
 
 ## TypeScript SDK (`ts/`)
 
@@ -307,6 +468,9 @@ npm --prefix ts test         # run the vitest suite
 | `RegionGuard` | `(allowed_regions=None, blocked_regions=None, lookup=default_lookup, ttl_s=300.0, on_lookup_failure="block")` — pass exactly one of allowed/blocked |
 | `DryRunLLM` | `()` |
 | `BaseLLM` | abstract base; subclass to add a client |
+| `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
+| `WebAgentResult` | `client, model, answer, trace, retrieved_urls, fetch_events_exposed, trace_complete, tools, client_version, duration_ms` (frozen; `.to_json()` gives the CLI document) |
+| `TraceEvent` | `kind, raw_type, raw, query=None, url=None, final_url=None, ok=None, result_urls=()` (frozen) |
 
 ## Errors
 
@@ -316,10 +480,14 @@ All inherit `SubllmError`:
 - `ClientError` — subprocess crash, missing binary, auth missing/invalid, tmux failure.
 - `OutputError` — empty output, invalid JSON, or schema-validation mismatch.
 - `RegionError` — preflight found the public IP out of region. Hard stop.
+- `IsolationError` — web-agent mode only: the trace held an event outside web
+  search/fetch, or a fetch of a non-public target. Carries `.trace`, never the
+  answer. Hard stop, and **not** a `FallbackLLM` trigger — the other client is
+  no safer.
 
 `CodexLLM`/`ClaudeLLM` retry only transient failures (`ClientError`/`OutputError`)
 within a single client with 1s/2s/4s backoff; cross-client failover is
-`FallbackLLM`'s job alone.
+`FallbackLLM`'s job alone. **`run_web_task` never retries** (see above).
 
 ## Hard constraint
 
@@ -327,6 +495,12 @@ Client-native execution only. subllm **never** builds or uses a
 subscription-to-API HTTP proxy (a token wrapped behind an OpenAI-compatible
 endpoint) — that rewrites request shapes, isn't client-native, and carries
 account-ban risk. It only ever drives the real official CLIs as subprocesses.
+
+The egress filter web-agent mode runs for the claude client is **not** that
+proxy: it is a network-layer CONNECT filter that decides whether a TCP
+destination may be reached. It terminates no TLS, reads and rewrites no token or
+request, and speaks no vendor API — the client authenticates to Anthropic
+itself, natively.
 
 ## Docs
 

@@ -24,6 +24,23 @@ Client-native execution only. NEVER build or use a subscription-to-API HTTP prox
 (token wrapped behind an OpenAI-compatible endpoint) — ban risk. subllm only
 drives the real official CLIs as subprocesses.
 
+## Web-agent mode (shipped, Python only)
+
+Beyond the text calls, both clients have `run_web_task` (+ `subllm web-agent`):
+one isolated browsing turn returning the answer plus a trace of what was
+searched and retrieved. Spec: `docs/superpowers/specs/2026-09-17-subllm-web-agent-mode-design.md`;
+contract: `docs/drivers-contract.md`.
+
+- The isolation boundary is `python/src/subllm/drivers/{codex,claude}_web.py`
+  plus `drivers/egress.py`. Change nothing there without re-reading D-3a/D-4b.
+- The hard constraint above is intact. `egress.py` is a network-layer CONNECT
+  filter (claude only): it terminates no TLS, reads/rewrites no token or
+  request, and speaks no vendor API — the client authenticates to Anthropic
+  itself. It is not a subscription-to-API proxy.
+- **A client update blocks web-agent mode** until the live G3 negative control
+  is re-run and the new version (codex: version+model) is added to the driver's
+  admitted set. Fail-closed by design; do not widen the set on faith.
+
 ## Build order (see docs/superpowers/plans/2026-06-02-subllm-v1.md for detail)
 
 1. `base.py`, `errors.py`, `preflight.py` (RegionGuard), `DryRunLLM`, pyproject/uv, tests scaffold
@@ -34,6 +51,7 @@ drives the real official CLIs as subprocesses.
 
 Tooling: `uv` for venv/deps. Tests use stub `codex`/`tmux` binaries on PATH — no
 real subscription calls in tests. The one exception is the opt-in live smoke
-suite (`tests/test_integration.py`), skipped unless `SUBLLM_LIVE=1`; run it with
+suite (`tests/test_integration.py`, and `tests/test_integration_web_agent.py`
+for web-agent mode), skipped unless `SUBLLM_LIVE=1`; run it with
 `SUBLLM_LIVE=1 uv run pytest -m integration` to verify the clients against the
 real subscriptions.

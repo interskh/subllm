@@ -296,3 +296,38 @@ Probes run before any code, because two of them are the slice's prerequisite gat
 - Deferred, recorded only: the timeout path discards the transcript unjudged (matches the `codex_web` convention).
 - **Live runs re-run this round and why:** the D-5 fix changes WHICH rule fires on G3, so G1+G3 were re-run (green), plus the 2.1.277 admission control and the acceptance command (`client_version: "2.1.277"`, `retrieved_urls: ["https://example.com"]`, `trace_complete: true`, exit 0).
 - Evidence: `uv run pytest tests/test_claude_web.py -q` → **63 passed**; full suite → **341 passed, 10 skipped**. The literal-loopback matched refusal is double-covered by design (both the recorded-refusal rule and `_check_targets` catch it); the NAME case is what makes the recorded-refusal rule load-bearing alone. Fix-round mutation battery **8/8 caught** (recorded refusal skipped when traced; port-rule carve-out removed; carve-out widened to every refusal; resolver branch removed; login detection removed; login markers widened back to a bare `/login`; `judge_target` reordered to check port before publicness; prompt-prefix mitigation removed). The earlier 16-mutant battery re-run after the fixes: still **16/16**.
+
+## T2 — docs: drivers contract (both modes), README usage, AGENTS.md note
+
+### Decisions
+- `docs/drivers-contract.md` gains THREE sections, not two: a shared `web-agent mode` contract (trace types, derived retrieved list, the two by-construction empties, §4.2 CLI JSON, one-attempt, IsolationError semantics, error table) plus one per client. The shared part is what both clients must agree on; duplicating it under each client is how a port drifts.
+- Each client section is ordered the way a port must execute it — invoke → flags NOT used + why → admission/preflight → isolation → env allowlist → trace source → classification → events → incomplete list → D-4b → **judgement order** → errors. The judgement ORDER is written out explicitly for both (it is behaviour, and nothing else in the repo states it).
+- Feature/record/attachment allowlists are copied verbatim (names are the contract); codex's 30-name `ENABLED_ALLOWLIST` justifications are pointed at in code rather than duplicated — they would rot next to the check.
+- Limitations are written as limitations, in the code's own hedged wording: codex's scanner-not-a-parser, codex's after-the-fact D-4b, claude's host-granular `final_url`, the profile bounding TCP only and NOT being a filesystem sandbox, the timeout path discarding the transcript.
+- The "not the banned proxy" statement is made in all three files (contract, README hard-constraint section, AGENTS.md) because each has a reader who will not read the others.
+- README: a `Web-agent mode` subsection under Usage with a field-by-field table framed as "what this means for grounding", plus a `web-agent` block under CLI. The URL-spelling asymmetry (`https://example.com/` vs `https://example.com`) is stated with the measured example in both README and the contract — it changes consumer code.
+- Updated the hermetic test count in Testing (56 → 341 passed, 10 skipped) because that line sits in a section this task edits; left the stale `Status:` line alone as drive-by.
+
+### Rejected
+- A single combined "web-agent" section covering both clients — the invocation, isolation and D-4b stories differ enough that a port would have to reverse-engineer which bullet applies.
+- Copying codex's `ENABLED_ALLOWLIST` justifications and the full script-scanner rule text into the doc — the scanner rules are summarized (shape allowlist, property denylist, key allowlist, escapes, one-complete-literal, the data exemption); the authority stays `codex_trace.py`.
+- Documenting `find_in_page` as verified — T1 recorded it as an assumption with no fixture, so it is labelled "ASSUMED, no fixture".
+- Rewriting README's `Status:` paragraph and the `ts/` section — out of scope for this task.
+
+### Assumptions
+- The contract's audience is a port author, so it states behaviour (including fail-closed costs) rather than rationale; rationale stays in the spec and this log. Check by handing the contract alone to the TS port when §7's parity item is picked up.
+- The three files are the whole doc surface §5 asks for. `grep -rln "codex_exec.py" docs/ README.md` also hits the v1/TS specs, plans and an old review — deliberately NOT updated: they are dated records, not living docs.
+
+### Deferred
+- No `docs/PRODUCT.md`/changelog equivalents exist in this repo, so nothing there.
+- TS parity, streaming traces, per-call allow/deny lists, response metadata and an OS filesystem sandbox stay undocumented as features (spec §7) — each is either absent from the docs or named explicitly as deferred/not-a-sandbox.
+
+### Code/doc mismatches found (documented as-is, code NOT changed — reported to the orchestrator)
+- `CodexLLM(codex_home=…)` is IGNORED by `run_web_task`: `run_codex_web_task` always builds a throwaway home via `_isolated_codex_home()` (sourced from `$CODEX_HOME` or `~/.codex`). README documents `codex_home` for the text path only; the contract now says the web path ignores it.
+- Empty-answer handling diverges from the text paths: `codex_web` never checks the `-o` file for content (an empty answer is returned as `answer=""`), and `claude_web` raises `ClientError` where `claude_tmux` raises `OutputError` for "no completed text turn". Documented as a KNOWN DIVERGENCE.
+- `--json` is passed to `codex exec` in web-agent mode but its stream is not the trace (only the error blob reads stdout); the contract says so, so a port does not build on it.
+- **CLI `--schema` is not content validation** (confirmed by reading `_validate_with_model` + `schema_model_from_json_schema`): the adapter is a `RootModel[dict]` that accepts any JSON object, so enforcement is the client's binding — native on codex (`--output-schema`), absent on claude (prompt-instructed only). G1's "schema-validated JSON" holds only via the Python API with a real Pydantic model. Documented in both README and the contract.
+
+### Touches
+- `docs/drivers-contract.md`, `README.md`, `AGENTS.md`. Prose only — no code, tests or fixtures touched; no shared code surface.
+- Evidence: `cd python && uv run pytest -q` → **341 passed, 10 skipped** (114 s), unchanged from T1b. No mutation battery: this task carries no logic.
