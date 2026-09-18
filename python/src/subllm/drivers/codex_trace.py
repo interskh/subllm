@@ -92,18 +92,48 @@ _ALLOWED_GLOBALS = frozenset({"tools", "text", "JSON"})
 _ALLOWED_KEYWORDS = frozenset(
     {"const", "let", "var", "await", "async", "return", "if", "else", "for",
      "of", "in", "try", "catch", "finally", "true", "false", "null",
-     "undefined", "typeof", "void", "function", "break", "continue", "while",
+     # `function` is deliberately absent: no legitimate client script needs a
+     # function expression, and it is the cheapest constructor-bearing value.
+     "undefined", "typeof", "void", "break", "continue", "while",
      "do", "switch", "case", "default", "throw"}
 )
-# Property names that reach the prototype chain or re-bind a function's `this`.
-# Denied ANYWHERE, on any value: this is what keeps the indirect reach closed.
+# Names that reach the prototype chain or re-bind a function's `this`. They are
+# a violation in EVERY position — property, declared name, destructuring key or
+# target, string literal, computed key, template expression — and are scanned on
+# the RAW script, before strings and comments are blanked. A property-position
+# rule alone was laundered three ways: `const {constructor: C} = async
+# function(){}` never takes the property path, and `"constructor"` passed as a
+# string to getOwnPropertyDescriptor was blanked before the scan ever saw it.
+# No legitimate client script contains any of these names anywhere.
 _DENIED_PROPERTIES = frozenset(
     {"constructor", "prototype", "__proto__", "call", "apply", "bind",
      "caller", "arguments", "__defineGetter__", "__defineSetter__",
      "__lookupGetter__", "__lookupSetter__"}
 )
 
+_DENIED_ANYWHERE = re.compile(
+    r"\b(?:" + "|".join(
+        ("constructor", "prototype", "__proto__", "call", "apply", "bind",
+         "caller", "arguments", "__defineGetter__", "__defineSetter__",
+         "__lookupGetter__", "__lookupSetter__")
+    ) + r")\b"
+)
+
+# Object keys the client actually emits (read from the committed captures;
+# `find` is the find-action counterpart of `open`). A generic "anything in key
+# position is exempt" rule laundered a ternary's middle operand — `1 ? Object :
+# 0` reads as key shape — so key position is an allowlist too.
+_ALLOWED_KEYS = frozenset(
+    {"open", "find", "ref_id", "search_query", "q", "response_length"}
+)
+
 _TOKEN = re.compile(r"(\.\s*)?([A-Za-z_$][A-Za-z0-9_$]*)\s*(:)?")
+# Two string literals joined by `+`: the value cannot be read statically, which
+# is how `C("return to"+"ols")` hid its payload.
+_CONCAT_LITERALS = re.compile(r'""\s*\+\s*""')
+# A computed key in an object literal or destructuring pattern (`{["x"]: v}`),
+# which the member-access pattern does not cover.
+_COMPUTED_KEY = re.compile(r"[{,]\s*\[")
 # `[` used as member access (after an identifier, `)`, `]` or a string) rather
 # than as an array literal. A NUMERIC index is allowed — it cannot spell a
 # property name — but `a[b]` and `a["cons"+"tructor"]` cannot be read, so they
@@ -130,11 +160,48 @@ _DECL = re.compile(
 _ARROW_PARAMS = re.compile(
     r"(?:\(([^)]*)\)|([A-Za-z_$][A-Za-z0-9_$]*))\s*=>"
 )
-_FUNCTION_PARAMS = re.compile(
-    r"\bfunction\s*(?:[A-Za-z_$][A-Za-z0-9_$]*)?\s*\(([^)]*)\)"
-)
 _CATCH_PARAM = re.compile(r"\bcatch\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)")
 _IDENT = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+_TRAILING_KEY = re.compile(r"([A-Za-z_$][A-Za-z0-9_$]*)[\"']?$")
+
+
+def _mask_data_strings(script: str) -> str:
+    """Blank out the string literals that are the VALUE of an allowlisted key
+    (`ref_id:"…"`, `q:"…"`, `response_length:"…"`), leaving every other string
+    literal in place for the denied-name scan.
+
+    Those values are DATA, not code: the ref_id rule already requires each to be
+    one complete literal, and each is checked downstream as a fetch or search
+    target. Scanning them for denied names made an ordinary URL —
+    `…/Function/prototype/call`, `/docs/how-to-call-the-api`, `/apply` — raise a
+    false isolation alarm, and a control that cries wolf on a normal URL gets
+    turned off. A string in any OTHER position (a call argument, for example
+    `getOwnPropertyDescriptor(…, "constructor")`) is still scanned."""
+    out = list(script)
+    i, n = 0, len(script)
+    while i < n:
+        ch = script[i]
+        if ch in "\"'":
+            start = i
+            i += 1
+            while i < n and script[i] != ch:
+                i += 2 if script[i] == "\\" else 1
+            i += 1
+            head = script[:start].rstrip()
+            if head.endswith(":"):
+                key = _TRAILING_KEY.search(head[:-1].rstrip())
+                if key is not None and key.group(1) in _ALLOWED_KEYS:
+                    for j in range(start, min(i, n)):
+                        out[j] = " "
+        elif script.startswith("//", i):
+            while i < n and script[i] != "\n":
+                i += 1
+        elif script.startswith("/*", i):
+            end = script.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            i += 1
+    return "".join(out)
 
 
 def _blank_strings(script: str) -> str:
@@ -202,10 +269,9 @@ def _declared_names(source: str) -> set[str]:
             names.update(_IDENT.findall(group))
         else:
             names.add(group)
-    for pattern in (_ARROW_PARAMS, _FUNCTION_PARAMS):
-        for match in pattern.finditer(source):
-            group = next((g for g in match.groups() if g), "")
-            names.update(_IDENT.findall(group))
+    for match in _ARROW_PARAMS.finditer(source):
+        group = next((g for g in match.groups() if g), "")
+        names.update(_IDENT.findall(group))
     for match in _CATCH_PARAM.finditer(source):
         names.add(match.group(1))
     return names
@@ -214,7 +280,17 @@ def _declared_names(source: str) -> set[str]:
 def scan_script(script: str) -> list[str]:
     """Isolation violations in one code-mode script."""
     problems: list[str] = []
-    if _IDENT_ESCAPE.search(script):
+    # Every name-based rule reads the script with the allowlisted keys' own
+    # string VALUES blanked: those are data (a URL, a query), and scanning them
+    # made `…/Function/prototype/call` or `/tools/` raise a false alarm. Strings
+    # in any other position stay scanned.
+    masked = _mask_data_strings(script)
+    for match in _DENIED_ANYWHERE.finditer(masked):
+        problems.append(
+            f"script used the denied name {match.group(0)!r} "
+            f"(denied in every position)"
+        )
+    if _IDENT_ESCAPE.search(masked):
         problems.append(
             "script used a \\u/\\x escape sequence, which can spell an "
             "identifier the scan would not match"
@@ -227,17 +303,21 @@ def scan_script(script: str) -> list[str]:
                 "script used an open:/find: call whose ref_id targets are not "
                 "statically determinable"
             )
-    for match in _TOOLS_REF.finditer(script):
-        rest = script[match.end():]
+    for match in _TOOLS_REF.finditer(masked):
+        rest = masked[match.end():]
         if not _TOOLS_CALL.match(rest):
             used = re.match(r"[.\[]?\s*[\"']?([A-Za-z0-9_$]+)", rest)
             name = used.group(1) if used else "<indirect>"
             problems.append(f"script used tool binding tools.{name}")
     for name, pattern in _ESCAPES:
-        if pattern.search(script):
+        if pattern.search(masked):
             problems.append(f"script referenced runtime-escape identifier {name}")
 
     source = _blank_strings(script)
+    if _CONCAT_LITERALS.search(source):
+        problems.append("script concatenated string literals")
+    if _COMPUTED_KEY.search(source):
+        problems.append("script used a computed property key")
     for match in _COMPUTED_ACCESS.finditer(source):
         key = match.group(1).strip()
         if not _NUMERIC_INDEX.fullmatch(key):
@@ -249,8 +329,12 @@ def scan_script(script: str) -> list[str]:
         if is_property:
             if name in _DENIED_PROPERTIES:
                 problems.append(f"script read property .{name}")
-        elif is_key or name in _ALLOWED_KEYWORDS or name in declared:
-            continue  # an object key, a keyword, or a local binding
+        elif (
+            (is_key and name in _ALLOWED_KEYS)
+            or name in _ALLOWED_KEYWORDS
+            or name in declared
+        ):
+            continue  # a known object key, a keyword, or a local binding
         elif name not in _ALLOWED_GLOBALS:
             problems.append(f"script referenced identifier {name}")
     return problems
@@ -552,10 +636,13 @@ def _web_item(
             result = results[i] if i < len(results) else None
             result = result if isinstance(result, dict) else {}
             final = result.get("url")
-            if url is None and not final:
-                # A fetch-class event whose target cannot be determined cannot
+            if url is None:
+                # A fetch-class event whose REQUESTED target cannot be
+                # determined — an unresolvable ref_id, or none at all — cannot
                 # be checked against D-4b, so it fails closed rather than
-                # passing as an unknown address.
+                # passing as an unknown address. A reported final URL does not
+                # rescue it: that is the address the client ended at, not the
+                # one it was asked for.
                 out.violations.append(
                     f"{atype} whose fetch target could not be determined "
                     f"(ref_id {raw_ref!r})"

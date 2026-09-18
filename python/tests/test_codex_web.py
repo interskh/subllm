@@ -1062,3 +1062,211 @@ def test_non_public_search_result_url_is_a_violation(tmp_path, codex_stub):
 def test_public_search_results_still_pass(codex_stub):
     codex_stub(rollouts=[SEARCH])
     assert run_task().trace_complete
+
+
+# --- prototype-chain laundering (final round) ------------------------------
+
+_LAUNDER_ASYNC_FUNCTION = (
+    'const {constructor: C} = async function(){};\n'
+    'const t = await C("return to"+"ols")();\n'
+    'text(await t.apply_patch("x"));'
+)
+_LAUNDER_DESCRIPTOR = (
+    'const O = 1 ? Object : 0;\n'
+    'const AF = O.getOwnPropertyDescriptor('
+    'O.getPrototypeOf(async function(){}), "constructor").value;\n'
+    'const t = await AF("return to"+"ols")();\n'
+    'text(await t.apply_patch("x"));'
+)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # Reported bypasses: both scanned CLEAN against the property-position
+        # rule and returned an answer.
+        _LAUNDER_ASYNC_FUNCTION,
+        _LAUNDER_DESCRIPTOR,
+        # Each laundering path on its own.
+        "const {constructor: C} = r.results.map;",      # destructured denied name
+        'const {["cons"+"tructor"]: C} = r;',            # computed key + concat
+        "text(Object.keys(r))",                          # key-position ternary's global
+        "function f(){}",                                # constructor-bearing value
+        'text("constructor")',                           # denied name in a string
+        "const O = 1 ? Object : 0; text(O)",             # the ternary exemption itself
+        # One case per rule, so each is load-bearing on its own rather than
+        # only behind a sibling rule.
+        "text((function(){ return 1 })())",               # function expression
+        'text("a"+"b")',                                  # literal concatenation
+        "const {[0]: v} = r; text(v)",                    # computed property key
+        "text(Reflect)", "text(Proxy)", "text(Function)",
+        "text(globalThis)", "text(String)", "text(Array)",
+    ],
+)
+def test_denied_names_and_unknown_globals_are_violations_in_every_position(
+    tmp_path, codex_stub, tail
+):
+    from subllm.drivers.codex_trace import scan_script
+
+    assert scan_script(_WEB_CALL + tail) != [], tail
+    recs = records(G1)
+    for r in recs:
+        if (r.get("payload") or {}).get("type") == "custom_tool_call":
+            r["payload"]["input"] = r["payload"]["input"].rstrip() + "; " + tail
+    rollout = write_rollout(tmp_path / "launder.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError):
+        run_task()
+
+
+def test_the_committed_capture_scripts_still_scan_as_before():
+    # The rule only counts if ordinary code survives it: every legitimate web
+    # script in the captures must still be clean after the tightening.
+    from subllm.drivers.codex_trace import scan_script
+
+    clean = 0
+    for path in sorted(FIXTURES.glob("*.jsonl")):
+        for record in records(path):
+            payload = record.get("payload") or {}
+            if payload.get("type") != "custom_tool_call":
+                continue
+            script = payload["input"]
+            if "web__run" in script and "multi_agent" not in script:
+                assert scan_script(script) == [], script
+                clean += 1
+    assert clean >= 3, "expected the G1, search and G3 web scripts"
+
+
+def test_search_result_that_does_not_resolve_is_not_a_violation(tmp_path, codex_stub):
+    # A search result nothing connected to: an NXDOMAIN host must not withhold a
+    # legitimate answer (D-4b judges where a connection actually GOES). Anything
+    # non-public by inspection still fails — see the 10.x test above.
+    def resolver(host: str) -> list[str]:
+        if host == "gone.example":
+            raise OSError("nodename nor servname provided")
+        return ["93.184.216.34"]
+
+    recs = records(SEARCH)
+    for r in recs:
+        item = (r.get("payload") or {}).get("item") or {}
+        if item.get("kind") == "web.search":
+            item["results"][1]["url"] = "https://gone.example/page"
+    rollout = write_rollout(tmp_path / "search-nxdomain.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    assert run_task(resolve=resolver).trace_complete
+
+
+def test_a_fetch_target_that_does_not_resolve_still_fails_closed(tmp_path, codex_stub):
+    # The fetch path is unchanged: there a connection DID happen, so an
+    # unverifiable name fails closed.
+    def resolver(host: str) -> list[str]:
+        if host == "gone.example":
+            raise OSError("nodename nor servname provided")
+        return ["93.184.216.34"]
+
+    recs = records(G1)
+    for r in recs:
+        item = (r.get("payload") or {}).get("item") or {}
+        if item.get("kind") == "web.search":
+            item["results"][0]["url"] = "https://gone.example/page"
+    rollout = write_rollout(tmp_path / "fetch-nxdomain.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError):
+        run_task(resolve=resolver)
+
+
+# --- an allowlisted key's string VALUE is data, not code -------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A `/call/`, `/apply`, `/prototype` segment is an ordinary URL. An
+        # isolation alarm on one is a false alarm, and a control that cries wolf
+        # on a normal fetch gets turned off by its owner.
+        "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/"
+        "Global_Objects/Function/prototype/call",
+        "https://example.com/docs/how-to-call-the-api",
+        "https://example.com/apply",
+        "https://example.com/plain-page",
+        "https://example.com/tools/process/eval",
+    ],
+)
+def test_denied_names_inside_a_ref_id_value_are_data(url):
+    from subllm.drivers.codex_trace import scan_script
+
+    script = (
+        'const r = await tools.web__run({open:[{ref_id:"%s"}],'
+        'response_length:"short"}); text(r)' % url
+    )
+    assert scan_script(script) == [], url
+
+
+def test_denied_names_inside_a_search_query_value_are_data():
+    from subllm.drivers.codex_trace import scan_script
+
+    script = (
+        'const r = await tools.web__run({search_query:[{q:"Function.prototype.call '
+        'and process.env"}],response_length:"short"}); text(r)'
+    )
+    assert scan_script(script) == []
+
+
+def test_an_mdn_style_url_fetches_end_to_end(tmp_path, codex_stub):
+    url = ("https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/"
+           "Global_Objects/Function/prototype/call")
+    recs = records(G1)
+    for r in recs:
+        payload = r.get("payload") or {}
+        if payload.get("type") == "custom_tool_call":
+            payload["input"] = (
+                'const r = await tools.web__run({open:[{ref_id:"%s"}],'
+                'response_length:"short"}); text(r)' % url
+            )
+        item = payload.get("item") or {}
+        if item.get("kind") == "web.search":
+            item["results"] = [{"type": "text_result", "ref_id": "turn0view0",
+                                "url": url, "title": "Function.prototype.call"}]
+    rollout = write_rollout(tmp_path / "mdn.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    assert derive_retrieved_urls(run_task().trace) == (url,)
+
+
+@pytest.mark.parametrize(
+    "script,reason",
+    [
+        (_LAUNDER_ASYNC_FUNCTION, "denied name 'constructor'"),
+        (_LAUNDER_DESCRIPTOR, "denied name 'constructor'"),
+        # The exemption is bounded to an allowlisted key's own value: a string
+        # in ANY other position — here a call argument — is still scanned.
+        ('const t = await C("return tools")(); text(t)', "tools."),
+    ],
+)
+def test_strings_outside_an_allowlisted_key_value_are_still_scanned(script, reason):
+    from subllm.drivers.codex_trace import scan_script
+
+    problems = scan_script(script)
+    assert any(reason in p for p in problems), problems
+
+
+def test_a_denied_name_as_a_ref_id_still_fails_downstream(tmp_path, codex_stub):
+    # The exemption says "this string is data", NOT "this target is fine":
+    # `ref_id:"constructor"` is not a URL and resolves to no earlier result, so
+    # the fetch target cannot be determined and the run fails closed.
+    recs = records(G1)
+    for r in recs:
+        payload = r.get("payload") or {}
+        if payload.get("type") == "custom_tool_call":
+            payload["input"] = (
+                'const r = await tools.web__run({open:[{ref_id:"constructor"}],'
+                'response_length:"short"}); text(r)'
+            )
+        item = payload.get("item") or {}
+        if item.get("kind") == "web.search":
+            item["results"] = [{"type": "text_result", "ref_id": "turn0view0",
+                                "url": "https://example.com/", "title": "ok"}]
+    rollout = write_rollout(tmp_path / "refid-denied.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    assert "could not be determined" in str(excinfo.value)

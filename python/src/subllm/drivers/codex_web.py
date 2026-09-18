@@ -399,7 +399,13 @@ def _check_fetch_targets(parsed: ParsedRollout, *, resolve: Resolver) -> None:
             # result naming a private address is a complete trace holding a
             # disallowed target, which is a violation, not an incomplete trace.
             for url in event.result_urls:
-                reason = classify_url(url, resolve=cached)
+                # A search result the run never connected to: a host that
+                # simply fails to resolve is NOT a violation (D-4b judges where
+                # a connection actually goes, and none was made), while
+                # anything non-public BY INSPECTION still is. The fetch path,
+                # where a connection did happen, still fails closed on an
+                # unresolvable name.
+                reason = classify_url(url, resolve=cached, unresolved_is_public=True)
                 if reason is not None:
                     raise IsolationError(
                         f"non-public search result URL for query "

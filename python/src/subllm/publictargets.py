@@ -48,9 +48,18 @@ def _address_reason(text: str) -> str | None:
     return f"{text} is not a public address"
 
 
-def classify_url(url: str | None, *, resolve: Resolver = default_resolver) -> str | None:
+def classify_url(
+    url: str | None,
+    *,
+    resolve: Resolver = default_resolver,
+    unresolved_is_public: bool = False,
+) -> str | None:
     """Return None when `url` is a public http/https target, else the reason it
-    is not. A missing URL is not public (nothing to prove it is)."""
+    is not. A missing URL is not public (nothing to prove it is).
+
+    `unresolved_is_public` relaxes ONLY the "name did not resolve" branch, for
+    callers judging a target nothing connected to (a search result). Everything
+    judged non-public by inspection still fails."""
     if not url:
         return "missing URL"
     parts = urlsplit(url)
@@ -82,8 +91,12 @@ def classify_url(url: str | None, *, resolve: Resolver = default_resolver) -> st
     try:
         addresses = resolve(host)
     except Exception as e:  # noqa: BLE001 — any resolution failure fails closed
+        if unresolved_is_public:
+            return None
         return f"host {host!r} could not be resolved ({e}): {url!r}"
     if not addresses:
+        if unresolved_is_public:
+            return None
         return f"host {host!r} resolved to nothing: {url!r}"
     for text in addresses:
         if _address_reason(text) is not None:
