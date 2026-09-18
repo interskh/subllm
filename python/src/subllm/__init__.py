@@ -5,12 +5,14 @@ from subllm.claude import ClaudeLLM
 from subllm.fallback import FallbackLLM
 from subllm.errors import (
     ClientError,
+    IsolationError,
     OutputError,
     QuotaError,
     RegionError,
     SubllmError,
 )
 from subllm.preflight import RegionGuard
+from subllm.webagent import TraceEvent, WebAgentResult
 
 __all__ = [
     "BaseLLM",
@@ -24,4 +26,7 @@ __all__ = [
     "ClientError",
     "OutputError",
     "RegionError",
+    "IsolationError",
+    "TraceEvent",
+    "WebAgentResult",
 ]
