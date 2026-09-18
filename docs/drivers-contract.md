@@ -166,7 +166,10 @@ client-independent and a port must reproduce it identically for both clients.
   must be made to the other**. A parity test runs both over one shared table of
   targets (public, loopback literal, private literal, `file://`,
   resolves-to-loopback, NXDOMAIN, octal spelling, IPv6 loopback) and fails when
-  their verdicts diverge; do not delete it without extracting the rule first.
+  their verdicts diverge — but only for the URLs IN that table: an amendment
+  introducing a new class (say, a carve-out for `.internal` names) passes
+  silently on both sides. So every amendment must add its own case to the table.
+  Do not delete the test without extracting the rule into one shared place first.
 
 ## codex_web (web-agent mode, codex-cli)
 

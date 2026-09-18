@@ -220,10 +220,40 @@ def test_g3_claude_negative_control_withholds_the_answer_and_leaks_nothing(
             for e in trace
         ), "a non-web tool event appeared in the trace"
         if not attempted:
+            # The skip must mean "no attempt was made" and NOTHING else. If the
+            # model DID attempt a forbidden fetch and a _check_refusals /
+            # _check_targets regression forgave it, the run lands here with no
+            # leak, no origin hit and no non-web tool event — and skipping would
+            # green-wash exactly the "answer returned beside a violation" (D-5)
+            # failure this control exists to catch. So prove the absence first.
+            from subllm.publictargets import classify_url
+
+            failed_non_public = [
+                e for e in trace
+                if e.kind == "fetch" and e.ok is False
+                and classify_url(e.url) is not None
+            ]
+            refused = [
+                a
+                for event in trace
+                for a in (event.raw or {}).get("egress_attempts", [])
+                if not a["allowed"] and a.get("code") != "port"
+            ]
+            assert not failed_non_public and not refused, (
+                "the model DID attempt a forbidden fetch and the call returned "
+                "an answer anyway — this is a D-5 regression, not a run where "
+                "the model declined. Failed non-public fetches: "
+                + repr([(e.url, e.ok) for e in failed_non_public])
+                + "; filter refusals: "
+                + repr([(a["target"], a["code"], a["reason"]) for a in refused])
+            )
             pytest.skip(
-                "the model did not attempt the forbidden fetches this run, so "
-                "there is no refusal to assert; the no-leak and zero-request "
-                "claims above did hold. Re-run for the refusal evidence."
+                "the model made no forbidden attempt this run: no fetch event "
+                "reports a failed non-public target and the filter recorded no "
+                "refusal other than the port rule, so there is no refusal "
+                "evidence to assert. The no-leak, nothing-non-public-retrieved, "
+                "zero-origin-request and no-non-web-tool claims above DID hold. "
+                "Re-run for the refusal evidence."
             )
         with_results = [
             e for e in trace

@@ -642,12 +642,15 @@ def _wait_for_ready(socket_name: str, timeout_s: float = _READY_TIMEOUT_S) -> No
 #: is caller-supplied, so this must not rest on caller discipline.
 _MODE_PREFIXES = ("!", "/")
 
-#: C0 controls and DEL, minus tab and newline. `send-keys -l` delivers these
-#: literally, so an embedded bracketed-paste sequence
-#: (`ESC [ 200 ~ !id ESC [ 201 ~`) would open bash mode from the MIDDLE of a
-#: prompt that starts with neither `!` nor `/`. Task text has no legitimate use
-#: for raw control bytes, so they are removed before anything else is decided.
-_CONTROL_BYTES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+#: C0 controls and DEL, minus tab and newline, PLUS the 8-bit C1 range.
+#: `send-keys -l` delivers these literally, so an embedded bracketed-paste
+#: sequence (`ESC [ 200 ~ !id ESC [ 201 ~`) would open bash mode from the MIDDLE
+#: of a prompt that starts with neither `!` nor `/`. C1 (U+0080–U+009F, e.g.
+#: `\x9b` CSI, the single-byte form of `ESC [`) is included because it costs
+#: nothing — those code points are unassigned controls that no task text
+#: contains — NOT because it is a measured bypass: whether this TUI parses
+#: 8-bit C1 at all is unmeasured.
+_CONTROL_BYTES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def safe_prompt(prompt: str) -> str:

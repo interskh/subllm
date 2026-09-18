@@ -1024,13 +1024,19 @@ def test_a_bash_mode_record_is_an_isolation_violation(content):
         ("title of example.com\r!id", "title of example.com!id"),
         # an early paste terminator turns the remainder into keystrokes
         ("line one\n\x1b[201~!id", "line one\n[201~!id"),
+        # 8-bit C1 CSI: the single-byte form of ESC [. Stripped because it is
+        # free, NOT because this TUI is known to parse it (unmeasured).
+        ("a\x9b200~!id", "a200~!id"),
         ("plain\ttabbed\ntext", "plain\ttabbed\ntext"),  # tab/newline survive
+        # ordinary prose is untouched: no printable text lives in C0/C1
+        ("café — naïve … 数字 ok", "café — naïve … 数字 ok"),
     ],
 )
 def test_control_bytes_are_stripped_from_a_prompt(prompt, sent):
     assert claude_web.safe_prompt(prompt) == sent
     assert "\x1b" not in claude_web.safe_prompt(prompt)
     assert "\r" not in claude_web.safe_prompt(prompt)
+    assert "\x9b" not in claude_web.safe_prompt(prompt)
 
 
 @needs_sandbox
