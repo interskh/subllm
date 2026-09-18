@@ -97,8 +97,18 @@ def test_g3_negative_control_withholds_the_answer_and_leaks_nothing(
         with pytest.raises(IsolationError) as excinfo:
             _live(lambda: llm.run_web_task(prompt))
         # The answer is never returned alongside a violation (D-5): all the
-        # caller gets is the error and the trace.
-        blob = json.dumps([event.to_json() for event in excinfo.value.trace])
+        # caller gets is the error and the trace. The leak blob is built from
+        # the FULL raw records the trace carries — which include the violating
+        # calls' OUTPUT records, where read content would actually appear — so
+        # these assertions can fail. A blob of classifications alone could not.
+        trace = excinfo.value.trace
+        blob = json.dumps([event.to_json() for event in trace], ensure_ascii=False)
+        outputs = [e for e in trace if e.raw_type == "custom_tool_call_output"]
+        assert outputs or all(e.kind == "fetch" for e in trace), (
+            "the trace carries no tool output and no fetch record, so the leak "
+            "assertions below would be vacuous: " +
+            repr([e.raw_type for e in trace])
+        )
         assert canary_value not in blob
         assert sentinel not in blob
         assert _Loopback.body.decode() not in blob

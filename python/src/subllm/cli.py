@@ -79,10 +79,19 @@ def _json_document(payload: object) -> str:
 
 def _write_json_line(document: str) -> None:
     # Encode first: a write that fails half-way would leave a torn document.
+    encoding = sys.stdout.encoding or "utf-8"
     try:
-        document.encode(sys.stdout.encoding or "utf-8")
+        document.encode(encoding)
     except (UnicodeEncodeError, LookupError):
-        document = document.encode("utf-8", "replace").decode("utf-8")
+        # Re-encoding the same Unicode as UTF-8 does NOT help an ASCII stdout.
+        # Re-dump with \uXXXX escapes instead: pure ASCII, still strict JSON
+        # and still the same values after json.loads.
+        try:
+            document = json.dumps(
+                json.loads(document), ensure_ascii=True, allow_nan=False
+            )
+        except Exception:  # noqa: BLE001 — not re-parseable; drop to escapes
+            document = document.encode("ascii", "backslashreplace").decode("ascii")
     sys.stdout.write(document + "\n")
 
 
@@ -126,11 +135,13 @@ def _run_web_agent(args: argparse.Namespace) -> int:
                     f"expected a JSON Schema object, got {type(document).__name__}"
                 )
         except (OSError, ValueError) as e:
-            # Usage error, not a client outcome: the closed error enum has no
-            # type for it, so it behaves like a bad argument. (JSONDecodeError
-            # is a ValueError.)
-            sys.stderr.write(f"error: --schema {args.schema}: {e}\n")
-            return 2
+            # §4.2: the machine consumer never parses stderr. The call never
+            # reached the model, so this is a client-side setup failure.
+            # (JSONDecodeError is a ValueError.) Argparse-level errors — an
+            # unknown flag — stay argparse's rc 2 on stderr.
+            return _emit_web_agent_error(
+                "client", f"--schema {args.schema}: {e}"
+            )
         schema_model = schema_model_from_json_schema(document)
 
     try:

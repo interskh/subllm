@@ -55,7 +55,9 @@ def codex_stub(fake_bin, tmp_path, monkeypatch):
     (home_src / "auth.json").write_text('{"tokens": {"access_token": "secret"}}')
     monkeypatch.setenv("CODEX_HOME", str(home_src))
 
-    probes = {"env": env_log, "argv": argv_log}
+    schema_log = tmp_path / "child-schema.json"
+    answer_file = tmp_path / "child-answer.txt"
+    probes = {"env": env_log, "argv": argv_log, "schema": schema_log}
 
     def configure(
         *,
@@ -66,6 +68,7 @@ def codex_stub(fake_bin, tmp_path, monkeypatch):
         exit_code: int = 0,
         stderr: str = "",
     ) -> dict:
+        answer_file.write_text(answer)
         copies = "\n".join(
             f'cp "{src}" "$CODEX_HOME/sessions/2026/09/18/rollout-{i}-x.jsonl"'
             for i, src in enumerate(rollouts)
@@ -83,9 +86,14 @@ for a in "$@"; do
   if [ "$prev" = "-o" ]; then out="$a"; fi
   prev="$a"
 done
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--output-schema" ]; then cp "$a" "{schema_log}"; fi
+  prev="$a"
+done
 mkdir -p "$CODEX_HOME/sessions/2026/09/18"
 {copies}
-printf '%s' "{answer}" > "$out"
+cp "{answer_file}" "$out"
 printf '%s' "{stderr}" >&2
 exit {exit_code}
 ''')
@@ -289,11 +297,11 @@ def test_a_legitimate_multi_open_script_still_passes_the_tightened_scan():
         'const r = await tools.web__run({open:[{ref_id:"https://example.com"},'
         '{ref_id:"https://example.com/x"}],response_length:"short"}); text(r)'
     )
-    from subllm.drivers.codex_trace import open_ref_arrays, scan_script
+    from subllm.drivers.codex_trace import ref_arrays, scan_script
 
     assert scan_script(script) == []
-    assert open_ref_arrays(script) == [
-        (["https://example.com", "https://example.com/x"], True)
+    assert ref_arrays(script) == [
+        ("open", ["https://example.com", "https://example.com/x"], True)
     ]
 
 
@@ -619,7 +627,7 @@ def test_schema_is_passed_and_the_answer_is_validated(codex_stub, tmp_path):
     class Answer(BaseModel):
         title: str
 
-    probes = codex_stub(rollouts=[G1], answer='{\\"title\\": \\"Example Domain\\"}')
+    probes = codex_stub(rollouts=[G1], answer='{"title": "Example Domain"}')
     llm = CodexLLM(model=ADMITTED_MODEL)
     result = llm.run_web_task("go", Answer)
     assert result.answer == {"title": "Example Domain"}
@@ -690,3 +698,367 @@ def test_fixtures_are_sanitized():
         for needle in ("/Users/", "access_token", "installation_id",
                        "base_instructions", "OPENAI_API_KEY", "id_token"):
             assert needle not in body, f"{path.name} still holds {needle}"
+
+
+# --- whole-run gate fix round ---------------------------------------------
+
+
+def _with_trailing_open(tmp_path: Path, target: str, name: str) -> Path:
+    """G1 plus an exec call that REQUESTS `target` and never produces a web
+    item — the client stops reporting the fetch it was asked for."""
+    recs = records(G1)
+    tail = [
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec", "call_id": "call_tail",
+            "input": 'const r = await tools.web__run({open:[{ref_id:"%s"}]}); text(r)' % target,
+        }},
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "call_id": "call_tail",
+            "output": [{"type": "input_text", "text": "Script completed"}],
+        }},
+    ]
+    at = next(i for i, r in enumerate(recs)
+              if (r.get("payload") or {}).get("type") == "task_complete")
+    return write_rollout(tmp_path / name, recs[:at] + tail + recs[at:])
+
+
+def test_unreported_open_of_a_private_target_is_a_violation(tmp_path, codex_stub):
+    # The request is right there in the rollout; dropping it because no web item
+    # came back would fail OPEN on exactly the address D-4b exists for.
+    rollout = _with_trailing_open(tmp_path, "http://10.0.0.5/secret", "leftover.jsonl")
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    assert "10.0.0.5" in str(excinfo.value)
+
+
+def test_unreported_open_of_a_public_target_is_incomplete(tmp_path, codex_stub):
+    rollout = _with_trailing_open(
+        tmp_path, "https://example.org/unreported", "leftover-public.jsonl"
+    )
+    codex_stub(rollouts=[rollout])
+    result = CodexLLM(model=ADMITTED_MODEL).run_web_task("go")
+    assert result.trace_complete is False
+    assert result.retrieved_urls == ()
+
+
+def _with_model(tmp_path: Path, model: str | None, name: str) -> Path:
+    recs = records(G1)
+    for r in recs:
+        if r.get("type") == "turn_context":
+            if model is None:
+                r["payload"].pop("model", None)
+            else:
+                r["payload"]["model"] = model
+    return write_rollout(tmp_path / name, recs)
+
+
+def test_rollout_that_ran_another_model_is_a_client_error(tmp_path, codex_stub):
+    # The admitted record is keyed on (version, MODEL): a server-side alias
+    # would run a per-model catalog nobody admitted.
+    codex_stub(rollouts=[_with_model(tmp_path, "gpt-5.6-nova", "model.jsonl")])
+    with pytest.raises(ClientError) as excinfo:
+        run_task()
+    assert "gpt-5.6-nova" in str(excinfo.value)
+
+
+def test_rollout_without_a_reported_model_is_incomplete(tmp_path, codex_stub):
+    codex_stub(rollouts=[_with_model(tmp_path, None, "nomodel.jsonl")])
+    assert run_task().trace_complete is False
+
+
+def test_turn_diff_is_a_violation(tmp_path, codex_stub):
+    # A turn diff is positive evidence of a file write.
+    recs = records(G1)
+    recs.insert(3, {"type": "event_msg", "payload": {"type": "turn_diff",
+                                                     "unified_diff": "--- a"}})
+    rollout = write_rollout(tmp_path / "diff.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError):
+        run_task()
+
+
+def test_a_violating_calls_output_is_carried_for_diagnosis(tmp_path, codex_stub):
+    # The failure must be diagnosable from the result itself (D-4), and a leak
+    # would surface in what the tool RETURNED, not in the call.
+    codex_stub(rollouts=[G3])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    assert any(e.raw_type == "custom_tool_call_output" for e in excinfo.value.trace)
+
+
+# --- cross-model reviewer round -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        # Prototype-chain escape: names nothing forbidden, reaches every tool.
+        'tools.web__run.constructor("return too"+"ls")().apply_patch("x")',
+        'text(r.__proto__.constructor)',
+        'Reflect.get(tools, "apply_patch")',
+        'new Proxy(tools, {})',
+        'text(this)',
+        'text(String.fromCharCode(97))',
+    ],
+)
+def test_script_shape_allowlist_rejects_indirect_reaches(tmp_path, codex_stub, script):
+    # The snippet is APPENDED to the capture's own legitimate open: call, so the
+    # fetch pairing stays valid and the shape rule is the only thing that can
+    # fail the run.
+    recs = records(G1)
+    for r in recs:
+        if (r.get("payload") or {}).get("type") == "custom_tool_call":
+            r["payload"]["input"] = r["payload"]["input"].rstrip() + "; " + script
+    rollout = write_rollout(tmp_path / "shape.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError):
+        run_task()
+
+
+def test_every_committed_capture_script_scans_as_the_client_wrote_it():
+    # The shape rule is grounded in real captures: the legitimate web scripts
+    # pass clean, and the violating ones are flagged for the BINDING they used,
+    # not merely for their shape.
+    from subllm.drivers.codex_trace import scan_script
+
+    scripts = {}
+    for path in sorted(FIXTURES.glob("*.jsonl")):
+        for record in records(path):
+            payload = record.get("payload") or {}
+            if payload.get("type") == "custom_tool_call":
+                scripts.setdefault(path.name, []).append(payload["input"])
+
+    for script in scripts["codex-0.154.0-open-success-and-failure.jsonl"]:
+        assert scan_script(script) == [], script
+    for script in scripts["codex-0.154.0-search.jsonl"]:
+        assert scan_script(script) == [], script
+    # The G3 multi-open script is legitimate SHAPE — its file:// target is
+    # caught by D-4b, not by the scanner.
+    web_open = [s for s in scripts["codex-0.154.0-g3-negative-control.jsonl"]
+                if "web__run" in s]
+    assert web_open and all(scan_script(s) == [] for s in web_open)
+    spawn = [s for s in scripts["codex-0.154.0-subagent-parent.jsonl"]
+             if "spawn_agent" in s and "ALL_TOOLS" not in s]
+    assert spawn and all(
+        any("tool binding" in p for p in scan_script(s)) for s in spawn
+    )
+
+
+def test_concatenated_ref_id_with_a_public_prefix_is_a_violation(tmp_path, codex_stub):
+    # The prefix alone reads as public; the real target is the userinfo trick
+    # `https://example.com@127.0.0.1/`. Removing the one-complete-literal rule
+    # must fail THIS test, not pass because the prefix happened to be `file:`.
+    recs = records(G1)
+    for r in recs:
+        if (r.get("payload") or {}).get("type") == "custom_tool_call":
+            r["payload"]["input"] = (
+                'const r = await tools.web__run({open:[{ref_id:'
+                '"https://example.com"+"@127.0.0.1/"}]}); text(r)'
+            )
+    rollout = write_rollout(tmp_path / "concat.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    assert "statically determinable" in str(excinfo.value)
+
+
+def test_find_in_page_with_an_undeterminable_target_is_a_violation(
+    tmp_path, codex_stub
+):
+    # No fixture backs the find_in_page shape, so a find whose target cannot be
+    # read fails closed instead of becoming (url=None, final_url=None).
+    recs = records(G1)
+    for r in recs:
+        payload = r.get("payload") or {}
+        if payload.get("type") == "custom_tool_call":
+            payload["input"] = (
+                'const r = await tools.web__run({find:[{ref_id:"turn9view9"}]}); text(r)'
+            )
+        item = payload.get("item") or {}
+        if item.get("kind") == "web.search":
+            item["action"] = {"type": "find_in_page"}
+            item["results"] = [{"type": "text_result", "ref_id": "turn9view9",
+                                "title": "Internal Error"}]
+    rollout = write_rollout(tmp_path / "find.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    assert "could not be determined" in str(excinfo.value)
+
+
+def test_opening_a_search_result_handle_resolves_to_its_url(tmp_path, codex_stub):
+    # `ref_id:"turn0search0"` is how the model opens a result of its OWN earlier
+    # search. It must resolve against that search's results, not be judged as a
+    # URL with no scheme.
+    search_recs = records(SEARCH)
+    item = next(r for r in search_recs
+                if ((r.get("payload") or {}).get("item") or {}).get("kind")
+                == "web.search")
+    first = item["payload"]["item"]["results"][0]
+    handle, url = first["ref_id"], first["url"]
+    assert handle.startswith("turn0search")
+
+    tail = [
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec", "call_id": "call_open",
+            "input": 'const r = await tools.web__run({open:[{ref_id:"%s"}]}); text(r)' % handle,
+        }},
+        {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "Extension", "kind": "web.search",
+            "action": {"type": "openPage", "url": handle},
+            "results": [{"type": "text_result", "ref_id": "turn1view0",
+                         "url": url, "title": "IANA-managed Reserved Domains"}],
+        }}},
+        {"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "call_id": "call_open",
+            "output": [{"type": "input_text", "text": "Script completed"}],
+        }},
+    ]
+    at = next(i for i, r in enumerate(search_recs)
+              if (r.get("payload") or {}).get("type") == "task_complete")
+    rollout = write_rollout(
+        tmp_path / "handle.jsonl", search_recs[:at] + tail + search_recs[at:]
+    )
+    codex_stub(rollouts=[rollout])
+    result = CodexLLM(model=ADMITTED_MODEL).run_web_task("go")
+    assert result.trace_complete, "a search-then-open flow must not fail"
+    fetches = [e for e in result.trace if e.kind == "fetch"]
+    assert [(e.url, e.final_url, e.ok) for e in fetches] == [(url, url, True)]
+    assert result.retrieved_urls == (url,)
+
+
+def test_cli_hands_codex_the_strict_rewrite_of_the_schema_document(
+    tmp_path, codex_stub, capsys
+):
+    # The CLI's own path uses T1's RootModel adapter, not a hand-written
+    # BaseModel: assert the file codex received IS the strict rewrite of the
+    # --schema document, since enforcement rests on that binding.
+    from subllm.cli import main
+    from subllm.codex import _to_strict_schema
+
+    document = {
+        "type": "object",
+        "properties": {"title": {"type": "string"},
+                       "note": {"type": "string", "default": None}},
+    }
+    schema_file = tmp_path / "s.json"
+    schema_file.write_text(json.dumps(document))
+    probes = codex_stub(rollouts=[G1], answer='{\"title\": \"Example Domain\", \"note\": \"x\"}')
+
+    rc = main(["web-agent", "--client", "codex", "--model", ADMITTED_MODEL,
+               "--schema", str(schema_file), "go"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert json.loads(out)["answer"] == {"title": "Example Domain", "note": "x"}
+    handed = json.loads(probes["schema"].read_text())
+    assert handed == _to_strict_schema(json.loads(json.dumps(document)))
+    assert handed["additionalProperties"] is False
+    assert handed["required"] == ["title", "note"]
+
+
+# --- shape rule: bounded widening ------------------------------------------
+
+_WEB_CALL = ('const r = await tools.web__run({open:[{ref_id:"https://example.com"},'
+             '{ref_id:"https://example.com/definitely-missing-subllm-probe"}],'
+             'response_length:"short"}); ')
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "text(r)",
+        "text(JSON.stringify(r))",
+        "text(r.results)",
+        "text(r.results[0].url)",
+        "for (const x of r.results) { text(x.title) }",
+        'text(r.results.map(x => x.url).join("\n"))',
+        "text(`got ${r.results.length}`)",
+        'const urls = r.results.filter(x => x.url).map(x => x.url); text(urls.join(", "))',
+        "try { text(r.results[1].title) } catch (e) { text(r) }",
+    ],
+)
+def test_ordinary_result_handling_scans_clean(tail):
+    # Reading properties of what the ALLOWED tools.web__run call RETURNED is not
+    # an escalation: that value is untrusted web content the script can only
+    # hand to text(). A scan that only admitted `text(r)` would raise
+    # IsolationError on legitimate code the next time the model writes a loop.
+    from subllm.drivers.codex_trace import scan_script
+
+    assert scan_script(_WEB_CALL + tail) == [], tail
+
+
+def test_ordinary_result_handling_runs_end_to_end(tmp_path, codex_stub):
+    recs = records(G1)
+    for r in recs:
+        if (r.get("payload") or {}).get("type") == "custom_tool_call":
+            r["payload"]["input"] = (
+                r["payload"]["input"].rstrip()
+                + '; for (const x of r.results) { text(`${x.title} ${x.url}`) }'
+            )
+    rollout = write_rollout(tmp_path / "ordinary.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    assert derive_retrieved_urls(run_task().trace) == ("https://example.com/",)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        # The prototype chain stays closed in every spelling.
+        'text(r.results.map.constructor("return this")())',
+        'text(r.results["constructor"])',
+        'text(r.results[idx])',
+        'text(r.__proto__)',
+        'text(r.results.map.call(r, x => x))',
+        'text(`${r.constructor}`)',
+        'const f = tools.web__run',
+    ],
+)
+def test_indirect_reaches_stay_violations(tmp_path, codex_stub, tail):
+    from subllm.drivers.codex_trace import scan_script
+
+    assert scan_script(_WEB_CALL + tail) != [], tail
+    recs = records(G1)
+    for r in recs:
+        if (r.get("payload") or {}).get("type") == "custom_tool_call":
+            r["payload"]["input"] = r["payload"]["input"].rstrip() + "; " + tail
+    rollout = write_rollout(tmp_path / "indirect.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError):
+        run_task()
+
+
+def test_a_template_literal_ref_id_is_still_undeterminable():
+    # Finding B stands: a ref_id VALUE must be one complete string literal even
+    # though template literals are allowed in ordinary code.
+    from subllm.drivers.codex_trace import ref_arrays, scan_script
+
+    script = "await tools.web__run({open:[{ref_id:`https://${host}/`}]})"
+    assert ref_arrays(script) == [("open", [], False)]
+    assert any("statically determinable" in p for p in scan_script(script))
+
+
+# --- D-4b applies to search results too ------------------------------------
+
+
+def test_non_public_search_result_url_is_a_violation(tmp_path, codex_stub):
+    # D-4b: hosted search is held to the SAME after-the-fact check. A complete
+    # trace carrying a disallowed target is a violation — not an "incomplete"
+    # trace, which asserts something different (that events may be missing).
+    recs = records(SEARCH)
+    for r in recs:
+        item = (r.get("payload") or {}).get("item") or {}
+        if item.get("kind") == "web.search":
+            item["results"][2]["url"] = "http://10.0.0.5/intranet"
+    rollout = write_rollout(tmp_path / "search-private.jsonl", recs)
+    codex_stub(rollouts=[rollout])
+    with pytest.raises(IsolationError) as excinfo:
+        run_task()
+    message = str(excinfo.value)
+    assert "search result" in message and "10.0.0.5" in message
+    assert "fetch" not in message, "the message must name the search event"
+
+
+def test_public_search_results_still_pass(codex_stub):
+    codex_stub(rollouts=[SEARCH])
+    assert run_task().trace_complete

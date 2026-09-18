@@ -1,5 +1,6 @@
 import io
 import json
+import sys
 from datetime import datetime
 
 import pytest
@@ -168,7 +169,7 @@ def test_schema_file_is_passed_as_a_schema_model_and_answer_stays_a_dict(
     assert json.loads(out.out)["answer"] == {"title": "Example Domain"}
 
 
-def test_unreadable_schema_file_is_a_usage_error(stub, capsys, tmp_path):
+def test_unreadable_schema_file_prints_a_typed_client_error(stub, capsys, tmp_path):
     stub(result=_result())
     rc, out = _run(
         [
@@ -177,9 +178,13 @@ def test_unreadable_schema_file_is_a_usage_error(stub, capsys, tmp_path):
         ],
         capsys,
     )
-    assert rc == 2
-    assert out.out == ""
-    assert "schema" in out.err
+    # §4.2: a typed document on stdout, never stderr — the consumer parses
+    # stdout only. Argparse-level errors stay argparse's rc 2 on stderr.
+    assert rc == 1
+    document = json.loads(out.out)
+    assert document["error"] == "client"
+    assert "schema" in document["message"]
+    assert document["trace"] is None
 
 
 @pytest.mark.parametrize(
@@ -353,7 +358,37 @@ def test_write_json_line_survives_an_unencodable_document(capsys):
     assert json.loads(out)["error"] == "client"
 
 
-def test_non_object_schema_document_is_a_usage_error(stub, capsys, tmp_path):
+def test_write_json_line_survives_an_ascii_only_stdout(monkeypatch):
+    # An ASCII stdout (LANG=C, a pipe on a minimal box) cannot encode the
+    # answer's accented text. Re-encoding the same Unicode as UTF-8 does not
+    # help; the document must come out as ASCII-safe STRICT JSON.
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict",
+                              newline="", write_through=True)
+    monkeypatch.setattr(sys, "stdout", stream)
+    cli._write_json_line('{"error": "client", "message": "caf\u00e9 \u2014 fin"}')
+    stream.flush()
+    raw = buffer.getvalue()
+    raw.decode("ascii")  # would raise if a non-ASCII byte escaped
+    assert json.loads(raw.decode("ascii"))["message"] == "caf\u00e9 \u2014 fin"
+
+
+def test_web_agent_answer_survives_an_ascii_only_stdout(stub, monkeypatch):
+    import io
+
+    stub(result=_result(answer="The title is \u201cExample Domain\u201d \u2014 caf\u00e9"))
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict",
+                              newline="", write_through=True)
+    monkeypatch.setattr(sys, "stdout", stream)
+    rc = cli.main(["web-agent", "--client", "codex", "--model", "m", "x"])
+    stream.flush()
+    assert rc == 0
+    document = json.loads(buffer.getvalue().decode("ascii"))
+    assert "caf\u00e9" in document["answer"]
+
+
+def test_non_object_schema_document_prints_a_typed_client_error(stub, capsys, tmp_path):
     stub(result=_result())
     path = tmp_path / "s.json"
     path.write_text("42")
@@ -361,9 +396,10 @@ def test_non_object_schema_document_is_a_usage_error(stub, capsys, tmp_path):
         ["web-agent", "--client", "codex", "--model", "m", "--schema", str(path), "x"],
         capsys,
     )
-    assert rc == 2
-    assert out.out == ""
-    assert "JSON Schema object" in out.err
+    assert rc == 1
+    document = json.loads(out.out)
+    assert document["error"] == "client"
+    assert "JSON Schema object" in document["message"]
 
 
 def test_bad_tools_value_is_rejected_by_argparse(capsys):

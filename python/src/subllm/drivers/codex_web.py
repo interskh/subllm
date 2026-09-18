@@ -217,6 +217,14 @@ def run_codex_web_task(
             f"rollout reports client version {parsed.client_version!r}, but "
             f"{version!r} was admitted"
         )
+    if parsed.model and parsed.model != model:
+        # The admitted record is keyed on (version, MODEL) because the tool set
+        # comes from the per-model catalog. A server-side alias or substitution
+        # would run a catalog nobody admitted.
+        raise ClientError(
+            f"rollout ran model {parsed.model!r}, but {model!r} was requested "
+            f"and admitted"
+        )
 
     return CodexWebRun(
         answer=answer,
@@ -378,12 +386,27 @@ def _flatten(rollouts: list[list[dict[str, Any]]]) -> list[TraceEvent]:
 
 
 def _check_fetch_targets(parsed: ParsedRollout, *, resolve: Resolver) -> None:
-    """D-4b: every traced fetch's requested AND final target must be a public
-    http/https address. For this client the check is after the fact — the fetch
+    """D-4b: every traced fetch's requested AND final target, and every URL a
+    traced search returned, must be a public http/https address. For this client the check is after the fact — the fetch
     runs on the vendor's servers, so subllm cannot block the connection, it can
     only refuse to return an answer that involved a non-public target."""
     cached = CachingResolver(resolve)
     for event in parsed.events:
+        if event.kind == "search":
+            # D-4b: "hosted search that runs on the vendor's servers cannot
+            # reach the owner's local network, but it is held to the same
+            # after-the-fact check." Same classifier, same severity — a search
+            # result naming a private address is a complete trace holding a
+            # disallowed target, which is a violation, not an incomplete trace.
+            for url in event.result_urls:
+                reason = classify_url(url, resolve=cached)
+                if reason is not None:
+                    raise IsolationError(
+                        f"non-public search result URL for query "
+                        f"{event.query!r}: {reason}",
+                        parsed.events,
+                    )
+            continue
         if event.kind != "fetch":
             continue
         for label, url in (("requested", event.url), ("final", event.final_url)):
