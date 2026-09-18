@@ -10,8 +10,9 @@ from typing import Any
 
 from subllm.base import BaseLLM, _retry, _validate_with_model
 from subllm.drivers.claude_tmux import run_claude_tmux
-from subllm.errors import OutputError
+from subllm.errors import ClientError, OutputError
 from subllm.preflight import RegionGuard
+from subllm.webagent import WebAgentResult
 
 _JSON_INSTRUCTION = "\n\nReturn ONLY a single JSON object — no prose, no code fence."
 
@@ -60,6 +61,61 @@ class ClaudeLLM(BaseLLM):
             parsed = _extract_json_object(self._run(prompt + instruction))
             return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
+
+    def run_web_task(
+        self,
+        prompt: str,
+        schema_model: type | None = None,
+        *,
+        tools: str = "web",
+        timeout_s: int = 300,
+    ) -> WebAgentResult:
+        """One isolated web-agent turn (§4.1). ONE attempt, no retry (D-4a): a
+        silent re-run would return a different browsing session than the one the
+        consumer timed and grades."""
+        # Imported here so `ClaudeLLM.__init__` and the text path stay free of
+        # the web-agent driver's imports (tmux/sandbox plumbing).
+        from subllm.drivers.claude_web import run_claude_web_task
+
+        if self._guard is not None:
+            self._guard.check()  # RegionError before any subprocess
+        if not self._model:
+            raise ClientError("web-agent mode requires an explicit model")
+
+        task = prompt
+        if schema_model is not None:
+            # No native schema binding on this client — instruct, then parse and
+            # validate what came back, exactly as complete_json_schema does.
+            task = (
+                prompt
+                + _JSON_INSTRUCTION
+                + " Match this JSON schema: "
+                + json.dumps(schema_model.model_json_schema())
+            )
+        run = run_claude_web_task(
+            task, model=self._model, tools=tools, timeout_s=timeout_s
+        )
+
+        answer: str | dict[str, Any] = run.answer
+        if schema_model is not None:
+            # A schema miss is an OutputError, not a retry (D-4a).
+            answer = _validate_with_model(
+                _extract_json_object(run.answer), schema_model
+            )
+
+        return WebAgentResult.build(
+            client="claude",
+            model=self._model,
+            answer=answer,
+            # Measured: every WebFetch appears in the transcript with its own
+            # status code, so fetch events are exposed by this client.
+            fetch_events_exposed=True,
+            trace=run.trace,
+            trace_complete=run.trace_complete,
+            tools=tools,
+            client_version=run.client_version,
+            duration_ms=run.duration_ms,
+        )
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:

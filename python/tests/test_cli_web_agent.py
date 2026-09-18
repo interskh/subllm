@@ -219,8 +219,18 @@ def test_isolation_error_carries_the_serialized_trace(stub, capsys):
     assert "answer" not in doc
 
 
-def test_client_without_web_agent_mode_errors_without_a_traceback(capsys):
-    # Goes through the REAL factory: ClaudeLLM has no run_web_task in slice 1.
+def test_client_without_web_agent_mode_errors_without_a_traceback(
+    capsys, monkeypatch
+):
+    # Both shipped clients implement run_web_task now (slice 1 codex, slice 2
+    # claude), so the guard is exercised with a client that does not — it stays
+    # the CLI's contract for any client added later.
+    class _NoWebAgent:
+        pass
+
+    monkeypatch.setattr(
+        cli, "_build_web_agent_client", lambda name, model: _NoWebAgent()
+    )
     rc, out = _run(
         ["web-agent", "--client", "claude", "--model", "claude-haiku-4-5", "x"],
         capsys,
