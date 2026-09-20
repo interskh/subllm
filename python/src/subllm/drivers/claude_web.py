@@ -90,6 +90,16 @@ ADMITTED_VERSIONS = frozenset({"2.1.276", "2.1.277"})
 #: The keychain item holding the owner's OAuth credential for the DEFAULT config
 #: home. The item is namespaced per config home, so a fresh CLAUDE_CONFIG_DIR is
 #: "Not logged in" until this blob's `claudeAiOauth` key is copied into it.
+#: Confirmed 2026-09-20 by listing the keychain: the bare service below is the
+#: default home's, beside nine `Claude Code-credentials-<hash8>` items, one per
+#: non-default home this machine has logged in from. On macOS the keychain is
+#: the only copy — there is no `~/.claude/.credentials.json` to read.
+#:
+#: Because the namespacing is real, a one-time `/login` into a FIXED dedicated
+#: home is a genuine alternative to copying: that home gets its own keychain
+#: item and its own refresh cycle, so a refresh inside a run cannot rotate the
+#: owner's own login. Copying keeps the owner's credential and accepts that
+#: risk (see the run log's owner caveat).
 _KEYCHAIN_SERVICE = "Claude Code-credentials"
 #: Only this key is copied. The blob also holds `mcpOAuth` server secrets, which
 #: an auth-only home must not carry (D-3).
