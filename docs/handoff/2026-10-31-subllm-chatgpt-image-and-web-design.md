@@ -76,3 +76,10 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 - `generate_image` resolves out_dir inside the ClientError wrapper (symlink loop -> ClientError naming out_dir).
 - Pre-run out_dir check requires `W_OK | X_OK`.
 - README image example shows an absolute path.
+
+### Slice 1 gate
+- Whole-run reviewer: PASS (README path minor and stale handoff lines fixed). Codex: 3 MAJOR + 2 MINOR, all fixed in 815ee5a; blocker-only re-check PASS.
+- Full suite after fixes: 390 passed, 11 skipped. Live `-k image`: 1 passed (~47 s, one decodable PNG).
+- Privacy scan of the slice range: clean (author-identity warning only).
+
+implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
