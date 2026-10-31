@@ -29,3 +29,25 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 **Touches**
 - python/src/subllm/base.py, __init__.py (public exports ImageResult, ImageGenerator), drivers/codex_exec.py, codex.py, tests/test_codex_image.py (new).
 - Shared surface: `__init__.py` exports and `run_codex_exec` signature (new kwarg) — web-route tasks add to `__init__.py`.
+
+### T2 — subllm image --route codex
+
+**Decisions**
+- `_run_image` in cli.py builds `CodexLLM()` defaults, prints one JSON line (`paths` as str, route, text, conversation_url, served_model) via `_json_document`/`_write_json_line`.
+- Errors: `error: <ClassName>: <msg>` on stderr, rc 1, stdout empty. Handled inside `_run_image`, so the shared `complete` handler (`error: <msg>`) is untouched.
+- Review fix: `generate_image` validates/creates out_dir (mkdir + W_OK) before codex starts and wraps copy OSError, both as ClientError (so a non-dir/unwritable -o gives `error: ClientError:` rc 1, no codex spend). An empty out_dir may now remain after OutputError/QuotaError; T1 quota test and the exclusive-create test (FileExistsError -> ClientError) updated.
+- `--route` is argparse `choices=["codex"]` only; slice 3 must widen it to include "web". `-o/--out-dir` required.
+
+**Rejected**
+- Typed prefix in the shared handler: would change `complete`/`complete-json` stderr format.
+- web-agent style typed JSON errors on stdout: spec §4.2 wants stderr for `image`.
+
+**Assumptions**
+- Prompt reaches codex via argv (`-- prompt`), so the stdin test checks argv in the stub.
+- Non-SubllmError exceptions (e.g. FileExistsError/OSError) propagate as a traceback; check if slice 2 wants them mapped.
+
+**Deferred**
+- Exit 3 / HumanActionRequired, --model/--effort/--mode/--plan/--browser flags: later slices.
+
+**Touches**
+- python/src/subllm/cli.py (new `image` subparser, docstring usage), python/tests/test_cli_image.py (new). Slice 3 collides on the `--route` choices and `_run_image`.

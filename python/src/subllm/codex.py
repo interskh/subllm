@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 import tempfile
@@ -91,17 +92,25 @@ class CodexLLM(BaseLLM, ImageGenerator):
         if self._guard is not None:
             self._guard.check()  # RegionError before any subprocess
         dest = Path(out_dir).expanduser().resolve()
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            if not (dest.is_dir() and os.access(dest, os.W_OK)):
+                raise NotADirectoryError(f"not a writable directory: {dest}")
+        except OSError as e:
+            raise ClientError(f"cannot use out_dir {dest}: {e}") from e
         saved: list[Path] = []
 
         def _collect(files: list[Path]) -> None:
             if not files:
                 raise OutputError("codex produced no image (the agent did not call the image tool)")
-            dest.mkdir(parents=True, exist_ok=True)
             stem = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{secrets.token_hex(4)}"
             for n, src in enumerate(files, 1):
                 target = dest / f"{stem}-{n}{src.suffix.lower()}"
-                with open(src, "rb") as fin, open(target, "xb") as fout:
-                    shutil.copyfileobj(fin, fout)
+                try:
+                    with open(src, "rb") as fin, open(target, "xb") as fout:
+                        shutil.copyfileobj(fin, fout)
+                except OSError as e:
+                    raise ClientError(f"cannot write image {target}: {e}") from e
                 saved.append(target)
 
         text = run_codex_exec(

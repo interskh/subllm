@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from subllm import ClaudeLLM, CodexLLM, ImageGenerator, ImageResult
-from subllm.errors import OutputError, QuotaError, RegionError
+from subllm.errors import ClientError, OutputError, QuotaError, RegionError
 
 PNG = b"\x89PNG\r\n\x1a\nfake-image-bytes"
 
@@ -110,7 +110,7 @@ def test_quota_error_writes_nothing(env):
     make(body=_WRITE + 'echo "usage limit reached" >&2\nexit 1\n')
     with pytest.raises(QuotaError):
         CodexLLM().generate_image("x", out)
-    assert not out.exists()
+    assert not out.exists() or list(out.iterdir()) == []
     assert (log / "calls.txt").read_text().count("run") == 1
 
 
@@ -179,7 +179,7 @@ def test_exclusive_create_never_overwrites(env, monkeypatch):
     }))
     out.mkdir()
     (out / "20260102T030405-deadbeef-1.png").write_bytes(b"KEEP")
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ClientError):
         CodexLLM().generate_image("x", out)
     assert (out / "20260102T030405-deadbeef-1.png").read_bytes() == b"KEEP"
 
@@ -216,3 +216,12 @@ def test_region_guard_runs_first(env):
 def test_image_generator_membership():
     assert isinstance(CodexLLM(), ImageGenerator)
     assert not isinstance(ClaudeLLM(), ImageGenerator)
+
+
+def test_out_dir_is_file_fails_before_codex(env, tmp_path):
+    log, _, _ = env
+    bad = tmp_path / "afile"
+    bad.write_text("x")
+    with pytest.raises(ClientError, match="afile"):
+        CodexLLM().generate_image("x", bad)
+    assert not (log / "calls.txt").exists()

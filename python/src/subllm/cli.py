@@ -4,6 +4,7 @@
     subllm complete-json  --client codex|claude [--schema schema.json] [PROMPT]
     subllm web-agent      --client codex|claude --model M [--tools web|none]
                           [--schema schema.json] [--timeout S] [PROMPT]
+    subllm image          --route codex -o OUT_DIR [PROMPT]
 
 PROMPT is read from the argument, or stdin when omitted / '-'.
 
@@ -174,6 +175,25 @@ def _run_web_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_image(args: argparse.Namespace) -> int:
+    from subllm.codex import CodexLLM
+
+    try:
+        result = CodexLLM().generate_image(_read_prompt(args.prompt), args.out_dir)
+        document = _json_document({
+            "paths": [str(p) for p in result.paths],
+            "route": result.route,
+            "text": result.text,
+            "conversation_url": result.conversation_url,
+            "served_model": result.served_model,
+        })
+    except SubllmError as e:
+        sys.stderr.write(f"error: {type(e).__name__}: {_safe_str(e)}\n")
+        return 1
+    _write_json_line(document)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="subllm")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -194,10 +214,17 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--timeout", type=float, default=None)
     w.add_argument("prompt", nargs="?", default=None)
 
+    i = sub.add_parser("image")
+    i.add_argument("--route", required=True, choices=["codex"])
+    i.add_argument("-o", "--out-dir", required=True)
+    i.add_argument("prompt", nargs="?", default=None)
+
     try:
         args = parser.parse_args(argv)  # argparse exits(2) on bad args/choices
         if args.cmd == "web-agent":
             return _run_web_agent(args)
+        if args.cmd == "image":
+            return _run_image(args)
         client = _build_client(args.client, args)
         prompt = _read_prompt(args.prompt)
         if args.cmd == "complete":
