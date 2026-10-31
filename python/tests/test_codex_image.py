@@ -225,3 +225,65 @@ def test_out_dir_is_file_fails_before_codex(env, tmp_path):
     with pytest.raises(ClientError, match="afile"):
         CodexLLM().generate_image("x", bad)
     assert not (log / "calls.txt").exists()
+
+
+def test_symlinked_generated_images_dir_not_collected(env, tmp_path):
+    log, out, make = env
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.png").write_bytes(b"SECRET")
+    make(body=f'ln -s "{outside}" "$CODEX_HOME/generated_images"\n')
+    with pytest.raises(OutputError):
+        CodexLLM().generate_image("x", out)
+    assert list(out.iterdir()) == []
+
+
+def test_auth_copy_failure_removes_scratch(env, monkeypatch, tmp_path):
+    import tempfile
+    from subllm.drivers import codex_exec
+    log, out, _ = env
+    made = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def spy(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        if k.get("prefix") == "subllm-codex-":
+            made.append(d)
+        return d
+
+    def boom(*a, **k):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(codex_exec.tempfile, "mkdtemp", spy)
+    monkeypatch.setattr(codex_exec.shutil, "copy2", boom)
+    with pytest.raises(PermissionError):
+        CodexLLM().generate_image("x", out)
+    assert len(made) == 1 and not Path(made[0]).exists()
+    assert not (log / "calls.txt").exists()
+
+
+def test_out_dir_symlink_loop_is_client_error(env, tmp_path):
+    from subllm.errors import ClientError
+    log, _, _ = env
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    with pytest.raises(ClientError, match="out_dir"):
+        CodexLLM().generate_image("x", a / "sub")
+    assert not (log / "calls.txt").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses permissions")
+def test_out_dir_without_search_permission_is_client_error(env, tmp_path):
+    from subllm.errors import ClientError
+    log, _, _ = env
+    d = tmp_path / "wo"
+    d.mkdir()
+    d.chmod(0o200)
+    try:
+        with pytest.raises(ClientError):
+            CodexLLM().generate_image("x", d)
+    finally:
+        d.chmod(0o700)
+    assert not (log / "calls.txt").exists()

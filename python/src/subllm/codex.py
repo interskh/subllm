@@ -91,13 +91,13 @@ class CodexLLM(BaseLLM, ImageGenerator):
         re-spend ~46 s and Codex quota per attempt; the caller decides."""
         if self._guard is not None:
             self._guard.check()  # RegionError before any subprocess
-        dest = Path(out_dir).expanduser().resolve()
         try:
+            dest = Path(out_dir).expanduser().resolve()
             dest.mkdir(parents=True, exist_ok=True)
-            if not (dest.is_dir() and os.access(dest, os.W_OK)):
+            if not (dest.is_dir() and os.access(dest, os.W_OK | os.X_OK)):
                 raise NotADirectoryError(f"not a writable directory: {dest}")
-        except OSError as e:
-            raise ClientError(f"cannot use out_dir {dest}: {e}") from e
+        except (OSError, RuntimeError) as e:
+            raise ClientError(f"cannot use out_dir {out_dir}: {e}") from e
         saved: list[Path] = []
 
         def _collect(files: list[Path]) -> None:

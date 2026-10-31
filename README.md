@@ -164,7 +164,7 @@ text = llm.complete("...")
 from subllm import CodexLLM
 
 res = CodexLLM().generate_image("A red circle on white.", "out/")
-print(res.paths)   # [Path("out/20261031T120000-1a2b3c4d-1.png")]
+print(res.paths)   # [Path("/abs/path/out/20261031T120000-1a2b3c4d-1.png")]  (absolute)
 ```
 
 Spends Codex quota (about 46 s per image). Files are saved as
@@ -392,7 +392,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (386 passed, 11 skipped)
+uv run pytest                 # no subscription, no network (390 passed, 11 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized

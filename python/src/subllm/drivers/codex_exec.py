@@ -109,10 +109,11 @@ def run_codex_exec(
             # Only generated_images/: codex also caches plugin preview.png files
             # elsewhere in the scratch home.
             images_dir = Path(scratch_home) / "generated_images"
-            collect_images(sorted(
+            files = [] if images_dir.is_symlink() or not images_dir.is_dir() else sorted(
                 p for p in images_dir.rglob("*")
                 if p.is_file() and not p.is_symlink()
-            ))
+            )
+            collect_images(files)
         return Path(out_path).read_text()
     finally:
         try:
@@ -134,6 +135,10 @@ def _isolated_codex_home(source: str | None = None) -> str:
     src = Path(source or os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
     scratch = tempfile.mkdtemp(prefix="subllm-codex-")
     auth = src / "auth.json"
-    if auth.exists():
-        shutil.copy2(auth, Path(scratch) / "auth.json")
+    try:
+        if auth.exists():
+            shutil.copy2(auth, Path(scratch) / "auth.json")
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
     return scratch

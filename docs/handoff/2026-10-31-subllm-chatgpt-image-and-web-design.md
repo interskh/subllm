@@ -10,13 +10,13 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 - `run_codex_exec(collect_images=...)`: when set, always a fresh scratch home (auth.json only, copied from the caller's `codex_home` else $CODEX_HOME/~/.codex), fresh empty temp work dir (`-C`, `cwd`, `stdin=DEVNULL`), both removed in `finally`.
 - Collector gets sorted regular non-symlink files under `<scratch>/generated_images/` only, after a zero exit and before scratch removal. Empty list is passed through; the CodexLLM collector raises OutputError.
 - `generate_image` is ONE attempt, no `_retry`: `_retry` catches OutputError/ClientError, so a refusal or timeout would re-spend ~46 s and quota per attempt. Matches `run_web_task`.
-- Names `<UTC ts>-<8 hex>-<n>.<ext>`, ext lowercased; `open(..., "xb")` so no overwrite. A collision raises FileExistsError (not wrapped; 32-bit random + second timestamp makes it near-impossible).
+- Names `<UTC ts>-<8 hex>-<n>.<ext>`, ext lowercased; `open(..., "xb")` so no overwrite. A collision raises FileExistsError (not wrapped; 32-bit random + second timestamp makes it near-impossible). (superseded by T2 fix: wrapped as ClientError)
 - Fixed prompt wrapper is a module constant `_IMAGE_INSTRUCTION` (A-6); `search` not passed.
 - `collect_images=None` path unchanged (same argv, no cwd/stdin, same codex_home handling).
 
 **Rejected**
 - `--json`/thread_id collection (spec D-2); diffing a shared home; wrapping with `_retry`.
-- Wrapping FileExistsError/OSError into ClientError: speculative, left raw.
+- Wrapping FileExistsError/OSError into ClientError: speculative, left raw. (superseded by T2 fix: wrapped as ClientError)
 
 **Assumptions**
 - Real codex writes images to `$CODEX_HOME/generated_images/<thread>/exec-<id>.png` (spec D-2, verified live 2026-10-31); stub tests mirror that. Check: slice 1 live test (later task).
@@ -24,7 +24,7 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 
 **Deferred**
 - CLI `subllm image`, drivers-contract entry, live test: later tasks.
-- Partial copy failure (ENOSPC/EACCES on file 2 of 2) leaves file 1 orphaned in out_dir with no ImageResult listing it; a name collision surfaces as raw FileExistsError (reviewer finding, parked as robustness).
+- Partial copy failure (ENOSPC/EACCES on file 2 of 2) leaves file 1 orphaned in out_dir with no ImageResult listing it; a name collision surfaces as raw FileExistsError (reviewer finding, parked as robustness). (superseded by T2 fix: wrapped as ClientError)
 
 **Touches**
 - python/src/subllm/base.py, __init__.py (public exports ImageResult, ImageGenerator), drivers/codex_exec.py, codex.py, tests/test_codex_image.py (new).
@@ -44,7 +44,7 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 
 **Assumptions**
 - Prompt reaches codex via argv (`-- prompt`), so the stdin test checks argv in the stub.
-- Non-SubllmError exceptions (e.g. FileExistsError/OSError) propagate as a traceback; check if slice 2 wants them mapped.
+- Non-SubllmError exceptions (e.g. FileExistsError/OSError) propagate as a traceback; check if slice 2 wants them mapped. (superseded by T2 fix: wrapped as ClientError)
 
 **Deferred**
 - Exit 3 / HumanActionRequired, --model/--effort/--mode/--plan/--browser flags: later slices.
@@ -68,3 +68,11 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 
 **Touches**
 - python/tests/test_integration.py, README.md, docs/drivers-contract.md. Slice 3 collides on README CLI/API rows.
+
+### Whole-run gate fixes
+
+- Collector returns an empty list when `<scratch>/generated_images` is a symlink or not a dir (D-2 boundary).
+- `_isolated_codex_home` removes its scratch dir and re-raises if the auth copy fails.
+- `generate_image` resolves out_dir inside the ClientError wrapper (symlink loop -> ClientError naming out_dir).
+- Pre-run out_dir check requires `W_OK | X_OK`.
+- README image example shows an absolute path.
