@@ -32,7 +32,7 @@ Goals, with the evidence that shows each is met:
 
 ## 2. Non-goals
 
-- **No silent route crossing.** Neither route falls back to the other. A caller who wants web-then-Codex composes `FallbackLLM` explicitly, and the web route raises `QuotaError` only when nothing was sent (§3 D-7).
+- **No silent route crossing.** Neither route falls back to the other. A caller who wants web-then-Codex text composes `FallbackLLM` explicitly, and the web route raises `QuotaError` only when nothing was sent (§3 D-7). `FallbackLLM` does not dispatch `generate_image` in this spec; image callers choose a route.
 - **No backend replay.** subllm never calls `chatgpt.com/backend-api` from Python, Node, or a page-context `fetch` of an API path. In-page `fetch(img.src)` of an image the page already renders is allowed (it is the page's own resource).
 - **No HTTP endpoint, no OpenAI-compatible shim**, and no reuse of `~/.codex/auth.json` outside the real `codex` binary. "Sign in with ChatGPT" plan usage is out (Codex/Work pool, no images).
 - **Deep Research, Agent mode, and Work mode** are out of this spec (follow-up spec).
@@ -78,7 +78,7 @@ All chatgpt.com knowledge lives in `page_core.js`: pure functions run inside the
 | `captureText(turn_key)` | Markdown via the turn's own Copy button, captured in-page; falls back to `innerText`. |
 | `servedModel(turn_key)` | The model label the page shows for that turn, or `null`. |
 
-Selectors cover both layouts (`div.ProseMirror[role=textbox]` / `#prompt-textarea`; `data-test-id` / `data-testid`; `[data-turn-key]` / `conversation-turn-*`). Completion is: no Stop control **and** a Copy control on the new turn **and** text unchanged across two reads; for images, also a new `<img>` inside the current turn, unchanged across two reads. A missing Stop control alone is never terminal.
+Selectors cover both layouts (`div.ProseMirror[role=textbox]` / `#prompt-textarea`; `data-test-id` / `data-testid`; `[data-turn-key]` / `conversation-turn-*`). Text completion is: no Stop control **and** a Copy control on the new turn **and** text unchanged across two reads. Image completion is: no Stop control **and** a new `<img>` inside the current turn, unchanged across two reads (no Copy requirement; an image-only turn may have none). A missing Stop control alone is never terminal.
 
 ### D-4 ego lite driver: generated script over `ego-browser nodejs`
 
@@ -168,7 +168,7 @@ subllm complete-json --client chatgpt-web  …same flags…  [PROMPT]
 subllm image         --route codex|web -o OUT_DIR [--mode …] [--plan …] [--browser …] [PROMPT]
 ```
 
-`--plan` defaults to `$SUBLLM_CHATGPT_PLAN`, else `plus`. `image` prints one JSON object: `{"paths": [...], "route": "...", "text": "...", "conversation_url": ..., "served_model": ...}`. Errors print `error: <Type>: <message>` on stderr and exit 1; `HumanActionRequired` exits 3 so wrappers can prompt the user.
+`--plan` defaults to `$SUBLLM_CHATGPT_PLAN`, else `plus`. The existing `--effort` flag is rejected with `--client chatgpt-web` (the web route uses `--mode`); `--mode`, `--plan` and `--browser` are rejected with `--client codex|claude`. `image` prints one JSON object: `{"paths": [...], "route": "...", "text": "...", "conversation_url": ..., "served_model": ...}`. Errors print `error: <Type>: <message>` on stderr and exit 1; `HumanActionRequired` exits 3 so wrappers can prompt the user.
 
 ### 4.3 ego script result protocol
 
@@ -190,11 +190,11 @@ Exactly one `SUBLLM_RESULT` per run. Missing result + a `SUBLLM_EVENT sent` line
 
 | # | Slice (user-visible) | Tasks | Subsystems | Prereq | Parallel |
 | --- | --- | --- | --- | --- | --- |
-| 1 | **Codex-route image, end to end.** `ImageResult`/`ImageGenerator`, `codex_exec` collector, `CodexLLM.generate_image`, `subllm image --route codex`, stub + live tests, drivers-contract entry. Verify D-2's open point. | 3 | codex driver, CLI | — | with 2 |
-| 2 | **Web-route text on ego lite.** `page_core.js` (`state`, `fillAndSend`, `turnStatus`, `captureText`; both layouts), `EgoDriver` (detection ladder, script generation, result protocol, hand-off, lock), `ChatGPTWebLLM.complete`/`complete_json` with `mode="default"`, new errors, `--client chatgpt-web`. Stub tests; browser fixture tests (§5.1); live test. | 3 | web driver (JS+ego), client/CLI | — | with 1 |
+| 1 | **Codex-route image, end to end.** `ImageResult`/`ImageGenerator`, `codex_exec` collector, `CodexLLM.generate_image`, `subllm image --route codex`, stub + live tests, drivers-contract entry. **First verify D-2's open point:** the 2026-10-31 live run used the real `~/.codex` without `-s read-only`, so it is not proof for the production invocation. | 3 | codex driver, CLI | — | no (shares `cli.py`, `__init__.py` with 2) |
+| 2 | **Web-route text on ego lite.** `page_core.js` (`state`, `fillAndSend`, `turnStatus`, `captureText`; both layouts), `EgoDriver` (detection ladder, script generation, result protocol, hand-off, lock), `ChatGPTWebLLM.complete`/`complete_json` with `mode="default"`, new errors, `--client chatgpt-web`. Stub tests; browser fixture tests (§5.1); live test. At the size ceiling: if it overruns, split fixture capture and sanitization into its own slice 2a. | 3 | web driver (JS+ego), client/CLI | 1 | no |
 | 3 | **Web-route image on ego lite.** Image detection and in-page `fetch` + `saveAs` in core/driver, `ChatGPTWebLLM.generate_image`, `subllm image --route web`. Fixture + live tests. | 2 | web driver, client/CLI | 2 | no |
 | 4 | **Chrome fallback.** `ChromeDriver` (patchright extra, owned profile, login hand-off), `browser="auto"` fallback wiring, live text + image on Chrome. | 2 | chrome driver, client | 3 | no |
-| 5 | **Modes and plan.** `selectMode`, `servedModel`, `plan` gating, downgrade audit, per-mode timeouts, CLI flags, README section on route choice and account risk. Fixture tests + one live Pro turn. | 3 | web driver, client/CLI | 3 | with 4 (disjoint: core/client vs chrome.py) |
+| 5 | **Modes and plan.** `selectMode`, `servedModel`, `plan` gating, downgrade audit, per-mode timeouts, CLI flags, README section on route choice and account risk. Fixture tests + one live Pro turn. | 3 | web driver, client/CLI | 4 | no (shares `ChatGPTWebLLM` with 4) |
 
 ### 5.1 Fixture tests
 
@@ -218,7 +218,8 @@ DOM fixtures are captured live from chatgpt.com states (logged out, idle Chat co
 ## 7. Deferred hardening
 
 - Reattach to a `SendUnconfirmedError` conversation URL and finish capturing (`resume(url)`).
-- Conversation cleanup through the UI menu; `temporary=True` for text once Temporary Chat's mode support is verified.
+- Conversation cleanup through the UI menu; `temporary=True` for text once Temporary Chat's mode support is verified; or a dedicated ChatGPT Project, created through the UI, to keep subllm chats out of the main history (image-use's approach).
+- Sweep stale `subllm-chatgpt-*` ego task spaces left open when a timed-out `ego-browser nodejs` is killed.
 - Honour image-use's `~/.chatgpt-web.lock` for cross-tool serialization on one account.
 - Typed handling of the specific Pro-cap dialog text, and reading remaining Pro quota from the page.
 - Full-size originals via `estuary/content?…&p=fs` when the rendered `blob:` image is downscaled (check sizes in slice 3 first).
