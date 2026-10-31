@@ -61,7 +61,7 @@ caller
 
 `generate_image` reuses the isolated `codex exec` invocation (scratch `CODEX_HOME` with only `auth.json`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `project_doc_max_bytes=0`). The driver gains an optional collector: after a zero exit and before the scratch home is removed, it copies every new file under `$CODEX_HOME/generated_images/` into `out_dir`. "New" is a before/after listing diff, so a caller-supplied `codex_home` works too. The prompt wraps the caller's text with a fixed instruction to call the image generation tool once and reply with one word (verified 2026-10-31: without naming the tool, the agent may answer with SVG). Zero new files raises `OutputError`. *Rejected:* parsing `--json` for `thread_id` (no event carries the image; the directory diff is simpler and works for any home), and calling `backend-api/codex/responses` directly (the image-use `codex` backend pattern; violates the hard constraint).
 
-**To verify in slice 1:** that `image_gen` is offered under the isolated home with `-s read-only`. The verified 2026-10-31 run used the real `~/.codex`. If it is not offered, the fallback is to copy only `skills/.system/imagegen/` into the scratch home; record which one was needed.
+**Verified 2026-10-31 with the production invocation** (scratch `CODEX_HOME` holding only `auth.json`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `project_doc_max_bytes=0`, empty stdin, codex-cli 0.165.0): exit 0 in 46 s, one 1536×1024 PNG at `$CODEX_HOME/generated_images/<thread_id>/exec-<call_id>.png`, 12,485 tokens (vs ~91k with the full home, which loads the imagegen skill). Codex also downloads plugin caches containing `preview.png` files into the scratch home, so the collector must look **only** under `generated_images/`.
 
 ### D-3 Web route: one page-side core, two thin substrates
 
@@ -73,12 +73,29 @@ All chatgpt.com knowledge lives in `page_core.js`: pure functions run inside the
 | --- | --- |
 | `state()` | `{logged_in, challenge, mode_surface: "chat" \| "work" \| "unknown", layout: "redesign" \| "legacy", busy}`. Logged in = composer present and no login button (the legacy profile-button test id is absent on the redesign; probe 2026-10-31). |
 | `selectMode(mode)` | Opens the model picker, selects, reads the selection back; returns `{ok, selected_label}`. Never sends. |
-| `fillAndSend(prompt)` | Fills the composer, verifies the exact editor text, clicks Send once, confirms a new user turn exists; returns `{sent, turn_key, conversation_url}`. |
-| `turnStatus(turn_key)` | `{done, text_stable, stop_visible, copy_visible, images: [src…], error_dialog}` scoped to the assistant turn after `turn_key`. |
+| `fillAndSend(prompt)` | Verifies the exact editor text after the substrate types it (D-3a), then sends once; returns `{sent, turn_key, conversation_url}` only after the URL becomes a server id (`/c/<uuid>`). |
+| `turnStatus(turn_key)` | `{done, text_stable, stop_visible, copy_visible, images: [src…], error_dialog}` scoped to the assistant turn after `turn_key`. `stop_visible` counts only a **rendered** Stop button: the composer keeps a hidden `aria-label="Stop"` button in the DOM after completion (observed 2026-10-31). |
 | `captureText(turn_key)` | Markdown via the turn's own Copy button, captured in-page; falls back to `innerText`. |
 | `servedModel(turn_key)` | The model label the page shows for that turn, or `null`. |
 
 Selectors cover both layouts (`div.ProseMirror[role=textbox]` / `#prompt-textarea`; `data-test-id` / `data-testid`; `[data-turn-key]` / `conversation-turn-*`). Text completion is: no Stop control **and** a Copy control on the new turn **and** text unchanged across two reads. Image completion is: no Stop control **and** a new `<img>` inside the current turn, unchanged across two reads (no Copy requirement; an image-only turn may have none). A missing Stop control alone is never terminal.
+
+### D-3a Input must look like a person typing; acceptance is the server id
+
+Live run on 2026-10-31 in an ego lite agent space:
+- **Inserting text without key events was rejected.** The composer was filled with `keyboard.insertText` and Send was clicked. The user turn rendered, but `POST backend-api/f/conversation/prepare` returned 403. The URL stayed at a local placeholder (`/c/local-chatgpt:<uuid>`), and the page showed "Unknown error" with a Retry button.
+- **Per-key typing was accepted.** A fresh space brought the tab to front (`Page.bringToFront`; `visibilityState` visible, focused), typed with per-key events (`keyboard.type`, 40 ms delay) and pressed Enter. Every request returned 200, the URL became `/c/<uuid>`, and the image completed about 40 s later.
+
+So the substrates must:
+- bring the tab to front;
+- type with per-key events and a delay, never `insertText` or paste;
+- send with Enter.
+
+A send counts as accepted only when the URL changes to a server id. "Unknown error" while the URL is still a `local-chatgpt:` placeholder means the server rejected the send before accepting it. That raises `ClientError` and is not resent; one changed variable (insert vs. type) separated failure from success, so treat this as the leading hypothesis, not proof.
+
+The Chat/Work toggle is two buttons labelled `Chat` and `Work` with `aria-pressed`, and the composer shows an effort picker (it read "Medium").
+
+**Web image retrieval verified 2026-10-31:** the result rendered as a `blob:` `<img>` (1254×1254) inside the turn's `[data-turn-key]` element, and `page.fetch(src, {saveAs})` saved a valid `image/png` (990 KB).
 
 ### D-4 ego lite driver: generated script over `ego-browser nodejs`
 
@@ -99,6 +116,7 @@ The web route does not use `_retry`. A call has two phases. **Before send** any 
 | Condition | Error | `FallbackLLM` default (`on=(QuotaError,)`) |
 | --- | --- | --- |
 | Rate-limit or usage-cap dialog **before** send | `QuotaError` | falls through |
+| Send rejected before the server accepted it (URL still `local-chatgpt:`, "Unknown error") | `ClientError` (no resend) | propagates |
 | Same dialog **after** send | `SendUnconfirmedError` | propagates |
 | Logged out, Cloudflare/Turnstile challenge | `HumanActionRequired` | propagates |
 | Composer in Work mode, mode selection unconfirmed | `ClientError` | propagates |
@@ -190,7 +208,7 @@ Exactly one `SUBLLM_RESULT` per run. Missing result + a `SUBLLM_EVENT sent` line
 
 | # | Slice (user-visible) | Tasks | Subsystems | Prereq | Parallel |
 | --- | --- | --- | --- | --- | --- |
-| 1 | **Codex-route image, end to end.** `ImageResult`/`ImageGenerator`, `codex_exec` collector, `CodexLLM.generate_image`, `subllm image --route codex`, stub + live tests, drivers-contract entry. **First verify D-2's open point:** the 2026-10-31 live run used the real `~/.codex` without `-s read-only`, so it is not proof for the production invocation. | 3 | codex driver, CLI | — | no (shares `cli.py`, `__init__.py` with 2) |
+| 1 | **Codex-route image, end to end.** `ImageResult`/`ImageGenerator`, `codex_exec` collector (only `generated_images/`), `CodexLLM.generate_image`, `subllm image --route codex`, stub + live tests, drivers-contract entry. | 3 | codex driver, CLI | — | no (shares `cli.py`, `__init__.py` with 2) |
 | 2 | **Web-route text on ego lite.** `page_core.js` (`state`, `fillAndSend`, `turnStatus`, `captureText`; both layouts), `EgoDriver` (detection ladder, script generation, result protocol, hand-off, lock), `ChatGPTWebLLM.complete`/`complete_json` with `mode="default"`, new errors, `--client chatgpt-web`. Stub tests; browser fixture tests (§5.1); live test. At the size ceiling: if it overruns, split fixture capture and sanitization into its own slice 2a. | 3 | web driver (JS+ego), client/CLI | 1 | no |
 | 3 | **Web-route image on ego lite.** Image detection and in-page `fetch` + `saveAs` in core/driver, `ChatGPTWebLLM.generate_image`, `subllm image --route web`. Fixture + live tests. | 2 | web driver, client/CLI | 2 | no |
 | 4 | **Chrome fallback.** `ChromeDriver` (patchright extra, owned profile, login hand-off), `browser="auto"` fallback wiring, live text + image on Chrome. | 2 | chrome driver, client | 3 | no |
