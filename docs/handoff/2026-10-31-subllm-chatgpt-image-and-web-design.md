@@ -51,3 +51,20 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 
 **Touches**
 - python/src/subllm/cli.py (new `image` subparser, docstring usage), python/tests/test_cli_image.py (new). Slice 3 collides on the `--route` choices and `_run_image`.
+
+### T3 — live test and docs
+
+**Decisions**
+- Live test `test_generate_image_writes_decodable_png` (only `-k image` match); stdlib PNG check helper (signature, IHDR >0, IDAT zlib-decompresses). Asserts paths inside out_dir, route codex, url/model None.
+- Live run once: PASSED, 47.5 s, 1 selected of 397. Image dimensions/file count not captured (test asserts >=1 file, decodable; no rerun to avoid quota spend).
+- README: new "Image generation (Codex route)" subsection, CLI line + sentence, API rows, `-k image` command, hermetic count 386 passed / 11 skipped.
+- drivers-contract: IMAGE COLLECTION bullet; KNOWN GAP reworded (Python passes --ephemeral always; -C/cwd/stdin-close only on image path).
+
+**Assumptions**
+- Count 386/11 includes the new live test as a skip; check with `cd python && uv run pytest -q`.
+
+**Deferred**
+- Web route docs, `--route web`: slices 2-3.
+
+**Touches**
+- python/tests/test_integration.py, README.md, docs/drivers-contract.md. Slice 3 collides on README CLI/API rows.

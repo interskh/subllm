@@ -158,6 +158,22 @@ llm = CodexLLM(
 text = llm.complete("...")
 ```
 
+### Image generation (Codex route)
+
+```python
+from subllm import CodexLLM
+
+res = CodexLLM().generate_image("A red circle on white.", "out/")
+print(res.paths)   # [Path("out/20261031T120000-1a2b3c4d-1.png")]
+```
+
+Spends Codex quota (about 46 s per image). Files are saved as
+`<UTC ts>-<8 hex>-<n>.png` and never overwrite existing files. It makes one
+attempt with no retry, so a refusal or timeout does not re-spend quota. It
+raises `OutputError` when codex produces no image, and `ClientError` when
+`out_dir` is not a writable directory (checked before codex starts).
+`CodexLLM` implements the `ImageGenerator` interface.
+
 ### ClaudeLLM (fallback)
 
 ```python
@@ -313,6 +329,7 @@ subllm complete       --client codex|claude  [--model M] [--effort E] [PROMPT]
 subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
+subllm image          --route codex -o OUT_DIR [PROMPT]
 ```
 
 `PROMPT` comes from the argument or stdin (`-`). For `complete` /
@@ -322,6 +339,10 @@ exit code. Example:
 ```bash
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
+
+`image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
+`served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
+stderr and exits 1.
 
 ### `web-agent` (machine-facing)
 
@@ -371,7 +392,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (341 passed, 10 skipped)
+uv run pytest                 # no subscription, no network (386 passed, 11 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -387,6 +408,7 @@ aren't on `PATH`; a `QuotaError` becomes a skip rather than a failure:
 SUBLLM_LIVE=1 uv run pytest -m integration            # codex + claude
 SUBLLM_LIVE=1 uv run pytest -m integration -k codex   # codex only
 SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
+SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex image (spends quota)
 ```
 
 Requires `codex` logged in to a ChatGPT plan; the claude tests additionally need
@@ -469,6 +491,9 @@ npm --prefix ts test         # run the vitest suite
 | `DryRunLLM` | `()` |
 | `BaseLLM` | abstract base; subclass to add a client |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
+| `CodexLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry |
+| `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
+| `ImageGenerator` | abstract base with `generate_image(prompt, out_dir)` |
 | `WebAgentResult` | `client, model, answer, trace, retrieved_urls, fetch_events_exposed, trace_complete, tools, client_version, duration_ms` (frozen; `.to_json()` gives the CLI document) |
 | `TraceEvent` | `kind, raw_type, raw, query=None, url=None, final_url=None, ok=None, result_urls=()` (frozen) |
 

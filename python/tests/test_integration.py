@@ -11,6 +11,7 @@ Run:
     SUBLLM_LIVE=1 uv run pytest -m integration -v
     SUBLLM_LIVE=1 uv run pytest -m integration -k codex     # codex only
     SUBLLM_LIVE=1 uv run pytest -m integration -k claude    # claude only
+    SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex image (spends quota)
 
 Requirements:
     codex   -> `codex` logged in to your ChatGPT plan
@@ -20,6 +21,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
+import zlib
 
 import pytest
 from pydantic import BaseModel
@@ -104,3 +107,40 @@ def test_complete_json_schema_validates_live(make_client):
     assert set(out) >= {"title", "word_count"}, f"schema keys missing: {out!r}"
     assert isinstance(out["word_count"], int)
     assert out["title"].strip(), "title was empty"
+
+
+def _assert_decodable_png(path) -> tuple[int, int]:
+    data = path.read_bytes()
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"not a PNG: {path.name}"
+    pos, idat, size = 8, b"", None
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        assert len(body) == length, "truncated PNG chunk"
+        if kind == b"IHDR":
+            size = struct.unpack(">II", body[:8])
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + length
+        if kind == b"IEND":
+            break
+    assert size and size[0] > 0 and size[1] > 0, f"bad IHDR: {size}"
+    assert zlib.decompress(idat), "IDAT did not decompress"
+    return size
+
+
+@_need_codex
+def test_generate_image_writes_decodable_png(tmp_path):
+    # Spends a little Codex quota (~46 s per image). Proves the whole route:
+    # prompt -> codex image tool -> generated_images collection -> out_dir.
+    out_dir = tmp_path / "out"
+    res = _live(lambda: CodexLLM().generate_image(
+        "A simple red circle on a plain white background.", out_dir
+    ))
+    assert res.paths, "no image files returned"
+    for p in res.paths:
+        assert p.resolve().parent == out_dir.resolve(), f"outside out_dir: {p}"
+        _assert_decodable_png(p)
+    assert res.route == "codex"
+    assert res.conversation_url is None and res.served_model is None

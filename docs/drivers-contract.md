@@ -23,9 +23,10 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
   still loads a project `AGENTS.md` from its working directory. Run each call in
   a fresh empty temp dir via `-C <dir>` (also the process `cwd`) so no project
   context leaks in. `--ephemeral` avoids persisting session files.
-  KNOWN GAP: the Python driver (`python/src/subllm/drivers/codex_exec.py`)
-  predates this and does NOT yet pass `-C`/`--ephemeral`; the TS driver does.
-  Backfill Python to match.
+  The Python driver (`python/src/subllm/drivers/codex_exec.py`) passes
+  `--ephemeral` on every call, but passes `-C`/`cwd` and closes stdin only on
+  the image path (below). KNOWN GAP: the Python text path still does neither;
+  the TS driver does both. Backfill Python to match.
 - STDIN: `codex exec` reads stdin even with an argv prompt — the driver must
   close the child's stdin (or it hangs). The TS driver calls `child.stdin.end()`;
   the Python driver should pass an empty stdin.
@@ -38,6 +39,18 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
   binary / other non-zero exit / timeout => ClientError.
   (NOTE: "try again later" is intentionally excluded — too generic; would
   misclassify auth/network failures as quota.)
+- IMAGE COLLECTION (`collect_images`, used by `CodexLLM.generate_image`;
+  verified on codex-cli 0.165.0):
+  - Every call gets a fresh per-call scratch `CODEX_HOME` holding only
+    `auth.json`, even when `codex_home` is given (auth is copied from it).
+  - Fresh empty work dir via `-C <dir>`, also the process `cwd`; stdin closed
+    (`DEVNULL`). Scratch home and work dir are removed in `finally`.
+  - After exit 0 and before cleanup, collect only regular files (no symlinks)
+    under `$CODEX_HOME/generated_images/`. Plugin caches hold a `preview.png`
+    elsewhere, so the rest of the home is never scanned.
+  - The prompt is prefixed with a fixed instruction to call the image tool
+    exactly once and not answer with SVG/HTML/code.
+  - Zero files collected => OutputError. One attempt, no retry.
 
 ## claude_tmux
 
