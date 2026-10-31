@@ -83,3 +83,40 @@ Design: docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md
 - Privacy scan of the slice range: clean (author-identity warning only).
 
 implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
+
+## Slice 2 — Web-route text on ego lite
+
+### T1 — page_core.js and browser fixture tests
+
+**Decisions**
+- `page_core.js` is one IIFE expression returning `{state, composerMatches, acceptance, turnStatus, captureText, servedModel}`; no window globals, no input events, no network.
+- One turn element holds both halves (spec wording "assistant turn after turn_key" adapted): text comes from the `:assistant` unit's markdown body, so the prompt is never in `text`. The Copy button lives OUTSIDE the assistant block (action row is a sibling), so `copyButton` searches the whole turn for an exact `Copy` label and skips anything inside the user unit.
+- `state().quota` added (pre-keypress QuotaError); `turnStatus(turn_key, prev_text)` takes `prev_text` for `text_stable`; `acceptance(url)` optional override for fixture tests; unknown/null key falls back to the last turn.
+- `captureText` restores the original descriptors in `finally` (deletes the own property if the method was inherited), and creates/removes a stub `navigator.clipboard` when the page has none.
+- Browser tests run one ego script for all fixtures (`SUBLLM_BROWSER=1`), 23 tests; in-page `pre_*` steps mutate the loaded DOM (fake clipboard, copy handlers, unhide Stop / user Copy message).
+- Synthetic fixtures (first-line `SYNTHETIC` comment), built by `bs4` edits of the live captures: logged-out, challenge, quota-dialog, rejected-send, streaming, completed-hidden-stop. The three `redesign-*` live captures are untouched.
+
+**Rejected**
+- `/copy/i` Copy match: captures the prompt via "Copy message" (observed live); exact label plus user-unit exclusion instead (the regex alone is a redundant-guard mutant, see below).
+- Scoping Copy to the climbed assistant block: the action row is not inside it (first run: copy_visible false).
+- Fabricated legacy fixtures: none exist; legacy selectors are held but untested.
+
+**Assumptions**
+- The turn key stays the same when the placeholder becomes a server id (unverified, hence the last-turn fallback). Check with a live two-phase send in T-live.
+- Streaming Stop and quota wording match the live page (synthetic only); replace `synthetic-streaming.html` with a live capture later.
+- ego `page.evaluate(string)` awaits promises (verified by the captureText tests).
+
+**Deferred**
+- Legacy layout tests, `servedModel` on redesign (null until slice 5 audit), image `images` assertions with a real image (slice 3).
+
+**Touches**
+- New: `python/src/subllm/drivers/chatgpt_web/{__init__.py,page_core.js}`, `python/tests/test_chatgpt_web_core.py`, six `synthetic-*.html` fixtures. Shared: `python/pyproject.toml` (`browser` marker).
+- Mutation battery: 10/10 behavioural mutants caught; `copy_regex_only` survives by design (the user-unit exclusion is a second guard; both removed together is caught).
+- Also touched `python/tests/test_codex_web.py::test_fixtures_are_sanitized` (iterdir -> recursive files): the new `chatgpt_web/` subdir made `read_text()` raise IsADirectoryError; the chatgpt_web fixtures now get the same needle scan.
+
+**Orchestrator additions (T1)**
+- Live sends so far: 2 of 3. Send 1 (17:11) captured nothing usable from `document.querySelector("main")`: after the client-side route change it returned a stale home `main`. Send 2 ran `page_core.js` live at every phase: `state()` chat/logged in; a 5-line prompt with a blank line typed as segments joined by `Shift+Enter` matched `composerMatches` and did not send early; `acceptance()` went pending (`/c/local-chatgpt%3A<uuid>`, turn_key null) -> accepted at ~0.9 s; the turn key at acceptance equalled the key at completion (assumption above verified); `turnStatus` reached done at ~10 s; `captureText` returned `format: "markdown"` (bullet list intact); `servedModel` null; clipboard methods restored.
+- After the Copy click the assistant button's label reads `Copied` for a moment; `redesign-completed-markdown.html` was captured in that state, so its test asserts stop/stability/text, not `done`.
+- New live fixtures: `redesign-streaming-text.html` (rendered Stop, no Copy) and `redesign-completed-markdown.html`, both trimmed to the `thread-scroll-container` subtree (the raw capture root climbed to the sidebar; the sidebar was cut before sanitizing). `synthetic-streaming.html` stays for the user-"Copy message" test.
+- `sanitize.py` (committed): allowlist text sanitizer for captures; drops `data-*name*/email` values (the home greeting carried the account name in `data-headline-name`).
+- Pre-send tab handling: `Page.bringToFront` before `goto` (one goto without it never rendered the composer).

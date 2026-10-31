@@ -693,7 +693,7 @@ def test_run_web_task_without_a_model_is_a_client_error():
 
 
 def test_fixtures_are_sanitized():
-    for path in sorted(FIXTURES.iterdir()):
+    for path in sorted(p for p in FIXTURES.rglob("*") if p.is_file()):
         body = path.read_text()
         for needle in ("/Users/", "access_token", "installation_id",
                        "base_instructions", "OPENAI_API_KEY", "id_token"):
