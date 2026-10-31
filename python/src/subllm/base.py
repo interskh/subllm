@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, TypeVar
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Literal, TypeVar
 
 from subllm.errors import ClientError, OutputError
 
@@ -48,6 +50,20 @@ class BaseLLM(ABC):
         """Default: ignore the schema, route through complete_json. Clients with
         native structured output (codex --output-schema) override this."""
         return self.complete_json(prompt)
+
+
+@dataclass(frozen=True)
+class ImageResult:
+    paths: list[Path]
+    route: Literal["codex", "web"]
+    text: str
+    conversation_url: str | None
+    served_model: str | None
+
+
+class ImageGenerator(ABC):
+    @abstractmethod
+    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult: ...
 
 
 class DryRunLLM(BaseLLM):

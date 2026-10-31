@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import secrets
+import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from subllm.base import BaseLLM, _retry, _validate_with_model
+from subllm.base import BaseLLM, ImageGenerator, ImageResult, _retry, _validate_with_model
 from subllm.drivers.codex_exec import run_codex_exec
 from subllm.drivers.codex_web import run_codex_web_task
 from subllm.errors import ClientError, OutputError
@@ -15,8 +18,14 @@ from subllm.webagent import WebAgentResult
 
 _JSON_INSTRUCTION = "\n\nReturn ONLY a single JSON object. No prose, no code fence."
 
+_IMAGE_INSTRUCTION = (
+    "Call the image generation tool exactly once to create the image described "
+    "below. Do not answer with SVG, HTML, or code. After the tool finishes, "
+    "reply with one word.\n\n"
+)
 
-class CodexLLM(BaseLLM):
+
+class CodexLLM(BaseLLM, ImageGenerator):
     def __init__(
         self,
         model: str | None = None,
@@ -75,6 +84,38 @@ class CodexLLM(BaseLLM):
             # Don't trust codex's binding blindly — validate against the model.
             return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
+
+    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult:
+        """One image turn. ONE attempt, no retry: a refusal or timeout would
+        re-spend ~46 s and Codex quota per attempt; the caller decides."""
+        if self._guard is not None:
+            self._guard.check()  # RegionError before any subprocess
+        dest = Path(out_dir).expanduser().resolve()
+        saved: list[Path] = []
+
+        def _collect(files: list[Path]) -> None:
+            if not files:
+                raise OutputError("codex produced no image (the agent did not call the image tool)")
+            dest.mkdir(parents=True, exist_ok=True)
+            stem = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{secrets.token_hex(4)}"
+            for n, src in enumerate(files, 1):
+                target = dest / f"{stem}-{n}{src.suffix.lower()}"
+                with open(src, "rb") as fin, open(target, "xb") as fout:
+                    shutil.copyfileobj(fin, fout)
+                saved.append(target)
+
+        text = run_codex_exec(
+            _IMAGE_INSTRUCTION + prompt,
+            model=self._model,
+            reasoning_effort=self._effort,
+            codex_home=self._codex_home,
+            timeout_s=max(self._timeout_s, 300),
+            collect_images=_collect,
+        )
+        return ImageResult(
+            paths=saved, route="codex", text=text,
+            conversation_url=None, served_model=None,
+        )
 
     def run_web_task(
         self,

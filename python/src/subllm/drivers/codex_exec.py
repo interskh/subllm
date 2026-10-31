@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from subllm.errors import ClientError, QuotaError
 
@@ -38,6 +39,7 @@ def run_codex_exec(
     codex_home: str | None = None,
     schema_path: str | None = None,
     timeout_s: int = 120,
+    collect_images: Callable[[list[Path]], None] | None = None,
 ) -> str:
     """Run one non-interactive codex turn. Returns the final message text.
 
@@ -46,6 +48,7 @@ def run_codex_exec(
     with tempfile.NamedTemporaryFile("r", suffix=".txt", delete=False) as out_f:
         out_path = out_f.name
     scratch_home: str | None = None
+    work_dir: str | None = None
     try:
         argv = [
             "codex", "exec",
@@ -68,18 +71,25 @@ def run_codex_exec(
             argv += ["-c", 'web_search="live"']
         if schema_path:
             argv += ["--output-schema", schema_path]
+        if collect_images:
+            work_dir = tempfile.mkdtemp(prefix="subllm-codex-work-")
+            argv += ["-C", work_dir]
         argv += ["--", prompt]  # -- so a prompt starting with '-' isn't parsed as a flag
 
         env = dict(os.environ)
-        if codex_home:
+        if codex_home and not collect_images:
             env["CODEX_HOME"] = codex_home
         else:
-            scratch_home = _isolated_codex_home()
+            scratch_home = _isolated_codex_home(codex_home)
             env["CODEX_HOME"] = scratch_home
 
+        run_kwargs: dict = {}
+        if collect_images:
+            run_kwargs = {"cwd": work_dir, "stdin": subprocess.DEVNULL}
         try:
             proc = subprocess.run(
-                argv, env=env, capture_output=True, text=True, timeout=timeout_s
+                argv, env=env, capture_output=True, text=True, timeout=timeout_s,
+                **run_kwargs,
             )
         except FileNotFoundError as e:
             raise ClientError("codex binary not found on PATH") from e
@@ -95,6 +105,14 @@ def run_codex_exec(
                 f"codex exec failed (exit {proc.returncode}): {blob[:200]}"
             )
 
+        if collect_images:
+            # Only generated_images/: codex also caches plugin preview.png files
+            # elsewhere in the scratch home.
+            images_dir = Path(scratch_home) / "generated_images"
+            collect_images(sorted(
+                p for p in images_dir.rglob("*")
+                if p.is_file() and not p.is_symlink()
+            ))
         return Path(out_path).read_text()
     finally:
         try:
@@ -103,15 +121,17 @@ def run_codex_exec(
             pass
         if scratch_home:
             shutil.rmtree(scratch_home, ignore_errors=True)
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _isolated_codex_home() -> str:
+def _isolated_codex_home(source: str | None = None) -> str:
     """Throwaway CODEX_HOME holding only a copy of the real auth.json.
 
     Copy (not symlink) the current token so the run authenticates without
     dragging in the real home's AGENTS.md / config / rules / skills.
     """
-    src = Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
+    src = Path(source or os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
     scratch = tempfile.mkdtemp(prefix="subllm-codex-")
     auth = src / "auth.json"
     if auth.exists():

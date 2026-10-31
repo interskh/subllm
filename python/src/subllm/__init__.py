@@ -1,5 +1,5 @@
 """subllm — subscription-native LLM clients."""
-from subllm.base import BaseLLM, DryRunLLM
+from subllm.base import BaseLLM, DryRunLLM, ImageGenerator, ImageResult
 from subllm.codex import CodexLLM
 from subllm.claude import ClaudeLLM
 from subllm.fallback import FallbackLLM
@@ -17,6 +17,8 @@ from subllm.webagent import TraceEvent, WebAgentResult
 __all__ = [
     "BaseLLM",
     "DryRunLLM",
+    "ImageGenerator",
+    "ImageResult",
     "CodexLLM",
     "ClaudeLLM",
     "FallbackLLM",
