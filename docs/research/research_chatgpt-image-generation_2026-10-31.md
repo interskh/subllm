@@ -1,5 +1,9 @@
 # Research: image generation through a ChatGPT subscription (2026-10-31)
 
+> **Superseded** by `research_chatgpt-web-automation_2026-10-31.md`. Requirement
+> changed: backends must use the ChatGPT Chat quota only, so the Codex-mode
+> recommendation below no longer applies.
+
 Question: can subllm generate images through the ChatGPT subscription in two
 modes — Codex and the chatgpt.com web UI — and can we reuse an existing project
 instead of writing our own driver?
