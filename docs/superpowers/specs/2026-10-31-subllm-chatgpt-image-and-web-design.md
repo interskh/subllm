@@ -1,8 +1,8 @@
 # subllm ChatGPT image generation and web route — Design Spec (2026-10-31)
 
 **Repo:** `python/` is authoritative. The TS SDK is not touched.
-**Grounding:** `docs/research/research_chatgpt-web-automation_2026-10-31.md` (survey, risk, ego lite probes) and `docs/research/research_chatgpt-image-generation_2026-10-31.md` (Codex image verification; its route recommendation is superseded by this spec).
-**Hard constraint (unchanged):** client-native execution only; no subscription-to-API proxy and no HTTP server in subllm.
+**Grounding:** `docs/research/research_chatgpt-web-automation_2026-10-31.md` (survey, risk, ego lite probes) and `docs/research/research_chatgpt-image-generation_2026-10-31.md` (Codex image verification). The web-automation report was written under a "Chat quota only" requirement and so excludes the Codex image path; the owner later asked for both routes, which this spec adopts. Where the report and this spec differ on Codex-route scope, this spec governs.
+**Hard constraint (scope extended, rule unchanged):** client-native execution only; no subscription-to-API proxy and no HTTP server in subllm. "Official client" now covers a third kind besides the two CLIs: the official chatgpt.com web app, driven in a real logged-in browser through that browser's own automation interface. Requests go only through the page's own UI; no backend call is replayed or re-exposed. `AGENTS.md` and the drivers contract are updated to say so (slice 2).
 
 ## 1. Problem & goals
 
@@ -17,15 +17,15 @@ Goals, with the evidence that shows each is met:
 
 - **G1. Codex-route images.** `CodexLLM.generate_image(prompt, out_dir)` returns the saved PNG paths.
   - **Evidence:** hermetic test with a stub `codex` that writes a PNG under its `CODEX_HOME/generated_images/<id>/`; the file is copied to `out_dir` and returned, and an exit with no PNG raises `OutputError`. Opt-in live test (`SUBLLM_LIVE=1`) produces a decodable PNG.
-- **G2. Web-route text.** `ChatGPTWebLLM.complete` / `complete_json` return the assistant's Markdown answer from chatgpt.com Chat.
+- **G2. Web-route text.** `ChatGPTWebLLM.complete` / `complete_json` return the assistant's answer from chatgpt.com Chat. `complete_result` returns the same answer with its provenance: format (Markdown from the page's Copy capture, or plain text when that capture failed), served model, and conversation URL.
   - **Evidence:** hermetic tests with a stub `ego-browser` that emits the result protocol (§4.3), covering success, logged out, Cloudflare challenge, quota dialog, and a crash after send. Opt-in live test (`SUBLLM_LIVE=1 SUBLLM_WEB=1`) returns an answer containing a requested token.
-- **G3. Web-route images.** `ChatGPTWebLLM.generate_image(prompt, out_dir)` saves the full-size image(s) of the current turn only.
+- **G3. Web-route images.** `ChatGPTWebLLM.generate_image(prompt, out_dir)` saves the image(s) of the current turn only, at the natural resolution the page renders (1254×1254 observed). Fetching a larger original, if one exists, is deferred (§7).
   - **Evidence:** hermetic stub tests as in G2; live test produces a decodable PNG/WebP whose bytes differ from any image in an earlier turn of the same session.
 - **G4. Chat quota only.** The web route never spends Codex/Work quota: it verifies the composer is in **Chat** mode (not Work) before every send and fails closed otherwise, and it never falls back to the Codex route by itself.
   - **Evidence:** DOM fixture test: a Work-mode fixture makes the pre-send check fail. Stub test: with a recording stub `codex` on PATH, a web-route quota failure raises `QuotaError` and the stub records no invocation.
 - **G5. Browser selection.** `browser="auto"` uses ego lite when `ego-browser` is installed and healthy, else Chrome; `"ego"` / `"chrome"` force one and fail with `ClientError` if unavailable.
   - **Evidence:** hermetic tests of the detection ladder with stub binaries; live test on this Mac (ego lite) and on Chrome (subllm-owned profile).
-- **G6. Modes and plan.** `mode="pro"` selects GPT Pro, verifies the selection before send, and audits the served model afterwards; `plan` (`free` | `plus` | `pro`, configurable, owner uses `pro`) rejects modes the plan lacks at construction time.
+- **G6. Modes and plan.** `mode="pro"` selects GPT Pro and verifies the selection before send. That pre-send verification is the guarantee. Afterwards it audits the served model as far as the page shows one: a different named model fails the call, and a missing label is reported as unverified (D-8); `plan` (`free` | `plus` | `pro`, configurable, owner uses `pro`) rejects modes the plan lacks at construction time.
   - **Evidence:** fixture tests for pick-and-verify and for the downgrade audit; unit test that `mode="pro"` with `plan="plus"` raises `ValueError`; one live Pro turn.
 - **G7. CLI.** `subllm complete --client chatgpt-web …` and `subllm image --route codex|web …` print text or one JSON document.
   - **Evidence:** hermetic CLI tests with stub binaries; typed errors map to a non-zero exit.
@@ -59,13 +59,13 @@ caller
 
 ### D-2 Codex route: same isolated run, collect PNGs before cleanup
 
-`generate_image` reuses the isolated `codex exec` invocation (scratch `CODEX_HOME` with only `auth.json`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `project_doc_max_bytes=0`). The driver gains an optional collector: after a zero exit and before the scratch home is removed, it copies every new file under `$CODEX_HOME/generated_images/` into `out_dir`. "New" is a before/after listing diff, so a caller-supplied `codex_home` works too. The prompt wraps the caller's text with a fixed instruction to call the image generation tool once and reply with one word (verified 2026-10-31: without naming the tool, the agent may answer with SVG). Zero new files raises `OutputError`. *Rejected:* parsing `--json` for `thread_id` (no event carries the image; the directory diff is simpler and works for any home), and calling `backend-api/codex/responses` directly (the image-use `codex` backend pattern; violates the hard constraint).
+`generate_image` reuses the isolated `codex exec` invocation (scratch `CODEX_HOME` with only `auth.json`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `project_doc_max_bytes=0`). Image runs **always** use a fresh per-call scratch home, even when the caller supplied `codex_home`; in that case only `auth.json` is copied from the caller's home. They also run in a fresh, empty working directory, so no project context or local files are in reach (the drivers contract's isolation rule). So every file under the scratch home's `generated_images/` belongs to this call, and concurrent calls cannot mix images. The driver gains an optional collector: after a zero exit and before the scratch home is removed, it copies those files into `out_dir`. The prompt wraps the caller's text with a fixed instruction to call the image generation tool once and reply with one word (verified 2026-10-31: without naming the tool, the agent may answer with SVG). Zero new files raises `OutputError`. *Rejected:* diffing a shared home's listing (concurrent calls can add unrelated images), parsing `--json` for `thread_id` (no event carries the image; the per-call home makes it unnecessary), and calling `backend-api/codex/responses` directly (the image-use `codex` backend pattern; violates the hard constraint).
 
 **Verified 2026-10-31 with the production invocation** (scratch `CODEX_HOME` holding only `auth.json`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, `project_doc_max_bytes=0`, empty stdin, codex-cli 0.165.0): exit 0 in 46 s, one 1536×1024 PNG at `$CODEX_HOME/generated_images/<thread_id>/exec-<call_id>.png`, 12,485 tokens (vs ~91k with the full home, which loads the imagegen skill). Codex also downloads plugin caches containing `preview.png` files into the scratch home, so the collector must look **only** under `generated_images/`.
 
 ### D-3 Web route: one page-side core, two thin substrates
 
-All chatgpt.com knowledge lives in `page_core.js`: pure functions run inside the page through `evaluate`. Substrates only navigate, inject the core, call it, wait, and save bytes. *Rejected:* wrapping `steipete/oracle` and `leeguooooo/image-use` as subprocesses — neither can drive ego lite (it has no external CDP port or MCP; probed 2026-10-31), so the default path on this Mac needs subllm-owned code anyway, and wrapping them on Chrome would double the selector surface against a UI that changes every one to three weeks. Their MIT-licensed logic is ported with attribution (image completion and in-page byte fetch from image-use; text completion, Copy-button capture, and fail-closed mode selection from oracle).
+All chatgpt.com knowledge lives in `page_core.js`: pure functions run inside the page through `evaluate`. Substrates only navigate, inject the core, call it, generate input (typing and the Enter keypress, D-3a), wait, and save bytes. *Rejected:* wrapping `steipete/oracle` and `leeguooooo/image-use` as subprocesses — neither can drive ego lite (it has no external CDP port or MCP; probed 2026-10-31), so the default path on this Mac needs subllm-owned code anyway, and wrapping them on Chrome would double the selector surface against a UI that changes every one to three weeks. Their MIT-licensed logic is ported with attribution (image completion and in-page byte fetch from image-use; text completion, Copy-button capture, and fail-closed mode selection from oracle).
 
 `page_core.js` exports:
 
@@ -73,7 +73,8 @@ All chatgpt.com knowledge lives in `page_core.js`: pure functions run inside the
 | --- | --- |
 | `state()` | `{logged_in, challenge, mode_surface: "chat" \| "work" \| "unknown", layout: "redesign" \| "legacy", busy}`. Logged in = composer present and no login button (the legacy profile-button test id is absent on the redesign; probe 2026-10-31). |
 | `selectMode(mode)` | Opens the model picker, selects, reads the selection back; returns `{ok, selected_label}`. Never sends. |
-| `fillAndSend(prompt)` | Verifies the exact editor text after the substrate types it (D-3a), then sends once; returns `{sent, turn_key, conversation_url}` only after the URL becomes a server id (`/c/<uuid>`). |
+| `composerMatches(prompt)` | True when the editor holds exactly `prompt`. The substrate types and presses Enter (D-3a); the core never generates input events. |
+| `acceptance()` | `{state: "pending" \| "accepted" \| "rejected", turn_key, conversation_url}`: `accepted` once the URL is a server id (`/c/<uuid>`), `rejected` when the page shows its send error while the URL is still a local placeholder. |
 | `turnStatus(turn_key)` | `{done, text_stable, stop_visible, copy_visible, images: [src…], error_dialog}` scoped to the assistant turn after `turn_key`. `stop_visible` counts only a **rendered** Stop button: the composer keeps a hidden `aria-label="Stop"` button in the DOM after completion (observed 2026-10-31). |
 | `captureText(turn_key)` | Markdown via the turn's own Copy button, captured in-page; falls back to `innerText`. |
 | `servedModel(turn_key)` | The model label the page shows for that turn, or `null`. |
@@ -109,15 +110,17 @@ Detection ladder for `browser="auto"`: `ego-browser` on PATH → `ego-browser --
 
 ### D-6 One send per call; never resend
 
-The web route does not use `_retry`. A call has two phases. **Before send** any failure is safe to report as `ClientError`, `QuotaError` or `HumanActionRequired`. **After send** (`fillAndSend` returned `sent`) any failure raises `SendUnconfirmedError` carrying the conversation URL; the caller can open it. Calls are serialized per machine with a file lock at `~/.local/share/subllm/chatgpt-web.lock` (the page rate-limits, and a parallel tab can receive another conversation's "Image created" toast).
+Every web call starts in a **new chat** (navigate to the new-chat page and confirm no conversation id in the URL before typing). Acceptance therefore means "the URL went from no conversation id to a server id after this call's keypress", and that id belongs to this call's turn. A call never types into an existing conversation.
+
+The web route does not use `_retry`. A call has three phases, split at the Enter keypress and at server acceptance. **Before the keypress** any failure is safe to report as `ClientError`, `QuotaError` or `HumanActionRequired`. **After the keypress, only a positive rejection** (`acceptance()` = `rejected`) is a `ClientError`. **Every other outcome after the keypress** that does not end in a completed result raises `SendUnconfirmedError`: still pending at timeout, a crash, a dialog, or failure after acceptance. It carries the conversation URL when one was accepted, else `null`; the caller can open it. Calls are serialized per machine with a file lock at `~/.local/share/subllm/chatgpt-web.lock` (the page rate-limits, and a parallel tab can receive another conversation's "Image created" toast).
 
 ### D-7 Errors and fallback eligibility
 
 | Condition | Error | `FallbackLLM` default (`on=(QuotaError,)`) |
 | --- | --- | --- |
-| Rate-limit or usage-cap dialog **before** send | `QuotaError` | falls through |
+| Rate-limit or usage-cap dialog **before** the keypress | `QuotaError` | falls through |
 | Send rejected before the server accepted it (URL still `local-chatgpt:`, "Unknown error") | `ClientError` (no resend) | propagates |
-| Same dialog **after** send | `SendUnconfirmedError` | propagates |
+| Any other failure **after** the keypress, including the same dialogs | `SendUnconfirmedError` | propagates |
 | Logged out, Cloudflare/Turnstile challenge | `HumanActionRequired` | propagates |
 | Composer in Work mode, mode selection unconfirmed | `ClientError` | propagates |
 | Pro requested but a different model served | `ModelDowngradeError` (carries the answer and served model) | propagates |
@@ -128,7 +131,7 @@ The web route does not use `_retry`. A call has two phases. **Before send** any 
 
 ### D-8 Modes and plan
 
-`mode` is `"default"` (leave the picker; still verify Chat surface), `"thinking"`, or `"pro"`. The mapping from mode to picker labels lives in `page_core.js` and is the first thing updated when the picker changes; selection is read back and must match, else `ClientError` before send. `plan` defaults to `"plus"` and gates modes at construction: `"pro"` needs `plan="pro"`. With `mode="pro"`, after completion `servedModel` must name a Pro model; otherwise `ModelDowngradeError` (the Chat Pro cap reportedly downgrades silently; caps unconfirmed — research §risk). Pro turns run long, so `timeout_s` defaults to 2,700 s for `pro` and 600 s otherwise.
+`mode` is `"default"` (leave the picker; still verify Chat surface), `"thinking"`, or `"pro"`. The mapping from mode to picker labels lives in `page_core.js` and is the first thing updated when the picker changes; selection is read back and must match, else `ClientError` before send. `plan` defaults to `"plus"` and gates modes at construction: `"pro"` needs `plan="pro"`. With `mode="pro"`, after completion `servedModel` must name a Pro model; a different named model raises `ModelDowngradeError`. If the page shows no model label, the result returns with `served_model = null`, meaning unverified, not passed; the pre-send verification remains the guarantee (G6). Slice 5 records whether the label exists (the Chat Pro cap reportedly downgrades silently; caps unconfirmed — research §risk). Pro turns run long, so `timeout_s` defaults to 2,700 s for `pro` and 600 s otherwise.
 
 ### D-9 Text turns use a regular chat by default
 
@@ -148,6 +151,13 @@ class ImageResult:
     conversation_url: str | None      # web route only
     served_model: str | None          # web route only, when the page shows it
 
+@dataclass(frozen=True)
+class WebTextResult:
+    text: str
+    format: Literal["markdown", "plain"]   # plain = Copy capture failed, innerText used
+    served_model: str | None              # None = page showed no label (unverified)
+    conversation_url: str
+
 class ImageGenerator(ABC):
     @abstractmethod
     def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult: ...
@@ -166,6 +176,7 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
         region_guard: RegionGuard | None = None,
         timeout_s: int | None = None,      # None -> 2700 for pro, else 600
     ) -> None: ...
+#   complete_result(prompt) -> WebTextResult; complete(prompt) returns its .text.
 #   region_guard.check() runs before any browser is touched (as in CodexLLM).
 #   complete_json appends CodexLLM's JSON instruction and parses with the same
 #   _parse_json_object; complete_json_schema keeps the BaseLLM default.
@@ -193,12 +204,13 @@ subllm image         --route codex|web -o OUT_DIR [--mode …] [--plan …] [--b
 The generated script prints exactly these tagged lines (ego routes `console.log` to stderr; the parser reads stdout and stderr):
 
 ```
-SUBLLM_EVENT {"sent": true, "conversation_url": "https://chatgpt.com/c/…"}     # at most once, right after send
+SUBLLM_EVENT {"phase": "keypress"}                                           # right before Enter is pressed
+SUBLLM_EVENT {"phase": "accepted", "conversation_url": "https://chatgpt.com/c/…"}   # once the server id appears
 SUBLLM_RESULT {"ok": true, "text": "…", "images": ["/abs/…"], "served_model": "…" | null}
-SUBLLM_RESULT {"ok": false, "kind": "human_action" | "quota" | "client" | "output" | "downgrade", "detail": "…", "sent": bool, "conversation_url": … }
+SUBLLM_RESULT {"ok": false, "kind": "human_action" | "quota" | "client" | "output" | "downgrade", "detail": "…", "conversation_url": …, "text": "…" | null, "served_model": "…" | null}
 ```
 
-Exactly one `SUBLLM_RESULT` per run. Missing result + a `SUBLLM_EVENT sent` line → `SendUnconfirmedError`; missing both → `ClientError` with the tail of stderr. A non-zero exit with a valid result line trusts the result line. The Chrome driver returns the same dict shapes in-process.
+A `downgrade` result carries the answer and the served model, so `ModelDowngradeError` gets its full payload from either substrate. The keypress marker is a **durable record made before the keypress**: the script writes it synchronously to a per-call file the parent supplies, and the parent reads that file, not the stream, to decide whether a send may have happened. A lost or buffered stream line cannot then make a sent prompt look unsent. Exactly one `SUBLLM_RESULT` per run. Missing result with a keypress record → `SendUnconfirmedError` (with the URL if an `accepted` event was seen); missing result and no keypress record → `ClientError` with the tail of stderr. The exit status is authoritative for failure. With a non-zero exit, an `ok: false` result line only refines which error is raised, and an `ok: true` result line is not trusted: the call fails as above (`SendUnconfirmedError` after a keypress, else `ClientError`). The Chrome driver returns the same dict shapes in-process.
 
 ### 4.4 Drivers contract
 
@@ -209,7 +221,7 @@ Exactly one `SUBLLM_RESULT` per run. Missing result + a `SUBLLM_EVENT sent` line
 | # | Slice (user-visible) | Tasks | Subsystems | Prereq | Parallel |
 | --- | --- | --- | --- | --- | --- |
 | 1 | **Codex-route image, end to end.** `ImageResult`/`ImageGenerator`, `codex_exec` collector (only `generated_images/`), `CodexLLM.generate_image`, `subllm image --route codex`, stub + live tests, drivers-contract entry. | 3 | codex driver, CLI | — | no (shares `cli.py`, `__init__.py` with 2) |
-| 2 | **Web-route text on ego lite.** `page_core.js` (`state`, `fillAndSend`, `turnStatus`, `captureText`; both layouts), `EgoDriver` (detection ladder, script generation, result protocol, hand-off, lock), `ChatGPTWebLLM.complete`/`complete_json` with `mode="default"`, new errors, `--client chatgpt-web`. Stub tests; browser fixture tests (§5.1); live test. At the size ceiling: if it overruns, split fixture capture and sanitization into its own slice 2a. | 3 | web driver (JS+ego), client/CLI | 1 | no |
+| 2 | **Web-route text on ego lite.** `page_core.js` (`state`, `composerMatches`, `acceptance`, `turnStatus`, `captureText`; both layouts), `EgoDriver` (detection ladder, script generation, typing and keypress, durable keypress record, result protocol, hand-off, lock), `ChatGPTWebLLM.complete`/`complete_json` with `mode="default"`, new errors, `--client chatgpt-web`, `AGENTS.md` hard-rule wording for the web client. Stub tests; browser fixture tests (§5.1); live test. At the size ceiling: if it overruns, split fixture capture and sanitization into its own slice 2a. | 3 | web driver (JS+ego), client/CLI | 1 | no |
 | 3 | **Web-route image on ego lite.** Image detection and in-page `fetch` + `saveAs` in core/driver, `ChatGPTWebLLM.generate_image`, `subllm image --route web`. Fixture + live tests. | 2 | web driver, client/CLI | 2 | no |
 | 4 | **Chrome fallback.** `ChromeDriver` (patchright extra, owned profile, login hand-off), `browser="auto"` fallback wiring, live text + image on Chrome. | 2 | chrome driver, client | 3 | no |
 | 5 | **Modes and plan.** `selectMode`, `servedModel`, `plan` gating, downgrade audit, per-mode timeouts, CLI flags, README section on route choice and account risk. Fixture tests + one live Pro turn. | 3 | web driver, client/CLI | 4 | no (shares `ChatGPTWebLLM` with 4) |
@@ -238,7 +250,7 @@ DOM fixtures are captured live from chatgpt.com states (logged out, idle Chat co
 - Reattach to a `SendUnconfirmedError` conversation URL and finish capturing (`resume(url)`).
 - Conversation cleanup through the UI menu; `temporary=True` for text once Temporary Chat's mode support is verified; or a dedicated ChatGPT Project, created through the UI, to keep subllm chats out of the main history (image-use's approach).
 - Sweep stale `subllm-chatgpt-*` ego task spaces left open when a timed-out `ego-browser nodejs` is killed.
-- Honour image-use's `~/.chatgpt-web.lock` for cross-tool serialization on one account.
+- Honour image-use's `~/.chatgpt-web.lock` for cross-tool serialization on one account; account-wide (cross-machine) serialization; and holding the next call while a `SendUnconfirmedError` conversation may still be generating remotely.
 - Typed handling of the specific Pro-cap dialog text, and reading remaining Pro quota from the page.
 - Full-size originals via `estuary/content?…&p=fs` when the rendered `blob:` image is downscaled (check sizes in slice 3 first).
 - Reference-image upload and editing on both routes (`codex exec -i`, composer file input).
@@ -247,4 +259,4 @@ DOM fixtures are captured live from chatgpt.com states (logged out, idle Chat co
 
 ## 8. Review status
 
-spec-review: pending
+spec-review: completed 2026-10-31
