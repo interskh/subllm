@@ -289,3 +289,12 @@ implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
 - `ego.py::_collect_images`: `save_numbered`'s `ClientError` (copy failure after the send) is wrapped as `SendUnconfirmedError` with the conversation URL, per D-6. `_images.py` and the codex route are unchanged. `test_image_existing_target_is_never_overwritten` now expects it (the existing file stays untouched); new CLI test `test_web_write_failure_after_send_includes_url` checks `(conversation: <url>)` on stderr. Mutation (wrap removed) failed both tests.
 - Live web image test also accepts JPEG via a stdlib `_assert_jpeg` (SOF0/1/2 size, checked on a synthetic header).
 - README: the `-k image` line now says the web image test also needs `SUBLLM_WEB=1`; the failure-mode text and the drivers-contract IMAGE SAVE item list the failed write; counts now 503 passed / 44 skipped.
+
+### Slice 3 gate
+- Whole-run reviewer: BLOCK (a post-send copy failure into out_dir raised ClientError without the URL, against D-6) -> fixed in 6d015d2 -> blocker-only re-check PASS. One of two fix cycles used.
+- Codex: 1 MAJOR (same write-failure finding) + 2 MINOR (live test rejected JPEG; README `-k image` line implied the web image test runs without SUBLLM_WEB=1), all fixed in 6d015d2. Not re-run: the fix only addresses its own findings.
+- Full suite at 6d015d2: 503 passed, 44 skipped. Browser fixture tests (SUBLLM_BROWSER=1, at T1): 31 passed. Live: web image test PASSED (44 s); one CLI call saved a 1254x1254 PNG (42 s). Both live calls ran before 6d015d2, which changes only the post-send write-failure path.
+- Privacy scan ad26598..HEAD: clean (author-identity warning only).
+- Deferred: a live completed-image DOM capture (synthetic fixture stands in) and a live check of the stability rule against a progressive preview; a failed write of file 2 of 2 leaves file 1 in out_dir (the error carries the URL); a duplicated path in the script's `images` list would be copied twice (the script builds the list itself). Slice-2 deferred items remain open (flock OSError other than EWOULDBLOCK, `WebTextResult.conversation_url` typing, `finish()` after an error, real error placement on chatgpt.com).
+
+implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
