@@ -199,3 +199,81 @@ def test_web_write_failure_after_send_includes_url(egoimg, capsys, monkeypatch):
     cap = capsys.readouterr()
     assert cap.out == "" and cap.err.startswith("error: SendUnconfirmedError:")
     assert f"(conversation: {URL})" in cap.err
+
+
+@pytest.fixture
+def web_spy(monkeypatch):
+    from subllm import chatgpt_web as cw
+    from subllm.base import ImageResult
+
+    seen = []
+
+    class Spy:
+        def __init__(self, **kw):
+            seen.append(kw)
+
+        def generate_image(self, prompt, out_dir):
+            return ImageResult(paths=[], route="web", text="t", conversation_url=None, served_model=None)
+
+    monkeypatch.setattr(cw, "ChatGPTWebLLM", Spy)
+    monkeypatch.delenv("SUBLLM_CHATGPT_PLAN", raising=False)
+    return seen
+
+
+def test_web_mode_and_plan_reach_the_client(web_spy, tmp_path):
+    assert _web(tmp_path / "o", "--mode", "pro", "--plan", "pro") == 0
+    assert web_spy == [{"mode": "pro", "plan": "pro", "browser": "auto"}]
+
+
+def test_web_env_plan_and_flag_precedence(web_spy, tmp_path, monkeypatch):
+    monkeypatch.setenv("SUBLLM_CHATGPT_PLAN", "pro")
+    assert _web(tmp_path / "o", "--mode", "pro") == 0
+    assert _web(tmp_path / "o", "--plan", "free") == 0
+    assert [k["plan"] for k in web_spy] == ["pro", "free"]
+
+
+def test_web_bad_env_plan_rc2(web_spy, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUBLLM_CHATGPT_PLAN", "gold")
+    assert _web(tmp_path / "o") == 2
+    assert "SUBLLM_CHATGPT_PLAN" in capsys.readouterr().err and web_spy == []
+
+
+def test_web_pro_without_pro_plan_rc2_sends_nothing(egoimg, tmp_path, monkeypatch, capsys):
+    d, out = egoimg
+    monkeypatch.delenv("SUBLLM_CHATGPT_PLAN", raising=False)
+    assert _web(out, "--mode", "pro") == 2
+    err = capsys.readouterr().err
+    assert "needs plan='pro'" in err and "Traceback" not in err
+    assert not (d / "calls").exists() and not out.exists()
+
+
+def test_web_mode_reaches_the_script(egoimg, monkeypatch):
+    d, out = egoimg
+    monkeypatch.delenv("SUBLLM_CHATGPT_PLAN", raising=False)
+    assert _web(out, "--mode", "thinking") == 0
+    line = next(l for l in (d / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    args = json.loads(line[len("const ARGS = "):].rstrip(";"))
+    assert args["mode"] == "thinking" and args["kind"] == "image"
+
+
+@pytest.mark.parametrize("flag", [["--mode", "pro"], ["--plan", "pro"]])
+def test_mode_plan_rejected_for_codex_route(flag, capsys):
+    assert main(["image", "--route", "codex", *flag, "-o", "o", "x"]) == 2
+    assert flag[0] in capsys.readouterr().err
+
+
+def test_env_plan_alone_never_errors_for_codex_route(fake_bin, home, tmp_path, monkeypatch):
+    _stub(fake_bin, _WRITE)
+    monkeypatch.setenv("SUBLLM_CHATGPT_PLAN", "gold")
+    assert main(["image", "--route", "codex", "-o", str(tmp_path / "o"), "x"]) == 0
+
+
+def test_web_model_downgrade_prints_typed_error(egoimg, monkeypatch, capsys):
+    from .test_chatgpt_web_ego import res
+
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", res(ok=False, kind="downgrade", detail="requested pro, served m",
+        conversation_url=URL, text="ans", served_model="m", requested_mode="pro"))
+    monkeypatch.setenv("STUB_CODE", "1")
+    assert _web(out, "--mode", "pro", "--plan", "pro") == 1
+    assert capsys.readouterr().err.startswith("error: ModelDowngradeError:")

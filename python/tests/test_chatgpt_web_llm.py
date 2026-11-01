@@ -112,6 +112,7 @@ class FakeChrome:
     reason = CHROME_MISSING
     run_error: Exception | None = None
     calls: list = []
+    kwargs: list = []
 
     def __init__(self):
         FakeChrome.calls.append("init")
@@ -123,14 +124,16 @@ class FakeChrome:
     def check_guide(self):
         FakeChrome.calls.append("check_guide")
 
-    def run_text(self, prompt, *, timeout_s):
+    def run_text(self, prompt, *, timeout_s, mode="default"):
         FakeChrome.calls.append("run_text")
+        FakeChrome.kwargs.append({"timeout_s": timeout_s, "mode": mode})
         if FakeChrome.run_error:
             raise FakeChrome.run_error
         return WebTextResult(text="from chrome", format="plain", served_model=None, conversation_url=URL)
 
-    def run_image(self, prompt, dest, *, timeout_s):
+    def run_image(self, prompt, dest, *, timeout_s, mode="default"):
         FakeChrome.calls.append("run_image")
+        FakeChrome.kwargs.append({"timeout_s": timeout_s, "mode": mode})
         if FakeChrome.run_error:
             raise FakeChrome.run_error
         p = dest / "chrome-1.png"
@@ -144,6 +147,7 @@ def chrome(monkeypatch):
     FakeChrome.reason = CHROME_MISSING
     FakeChrome.run_error = None
     FakeChrome.calls = []
+    FakeChrome.kwargs = []
     monkeypatch.setattr(cw, "ChromeDriver", FakeChrome)
     return FakeChrome
 
@@ -315,11 +319,67 @@ def test_region_guard_precedes_fallback_detection(no_ego, chrome):
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"mode": "thinking"}, {"plan": "gold"}, {"browser": "firefox"}],
+    [{"mode": "turbo"}, {"plan": "gold"}, {"browser": "firefox"}],
 )
 def test_bad_args(kwargs):
     with pytest.raises(ValueError):
         ChatGPTWebLLM(**kwargs)
+
+
+def test_pro_mode_needs_pro_plan():
+    with pytest.raises(ValueError, match=r"mode 'pro' needs plan='pro' \(got 'plus'\)"):
+        ChatGPTWebLLM(mode="pro", plan="plus")
+    with pytest.raises(ValueError, match="'pro'.*'free'"):
+        ChatGPTWebLLM(mode="pro", plan="free")
+    with pytest.raises(ValueError, match="'pro'.*'plus'"):
+        ChatGPTWebLLM(mode="pro")
+    ChatGPTWebLLM(mode="pro", plan="pro")
+
+
+@pytest.mark.parametrize("plan", ["free", "plus", "pro"])
+def test_thinking_mode_on_any_plan(plan):
+    ChatGPTWebLLM(mode="thinking", plan=plan)
+
+
+def test_invalid_plan_gets_the_plan_message_even_with_pro_mode():
+    with pytest.raises(ValueError, match="plan must be one of"):
+        ChatGPTWebLLM(mode="pro", plan="gold")
+
+
+def test_bad_mode_message():
+    with pytest.raises(ValueError, match="mode must be one of"):
+        ChatGPTWebLLM(mode="turbo")
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"mode": "pro", "plan": "pro"}, 2700.0),
+        ({"mode": "default"}, 600.0),
+        ({"mode": "thinking"}, 600.0),
+        ({"mode": "pro", "plan": "pro", "timeout_s": 90.0}, 90.0),
+        ({"mode": "thinking", "timeout_s": 5.0}, 5.0),
+    ],
+)
+def test_timeout_defaults_reach_the_driver(ego, chrome, tmp_path, kwargs, expected):
+    llm = ChatGPTWebLLM(browser="chrome", **kwargs)
+    llm.complete("q")
+    llm.generate_image("q", tmp_path / "out")
+    assert [k["timeout_s"] for k in chrome.kwargs] == [expected, expected]
+
+
+@pytest.mark.parametrize("mode", ["default", "thinking", "pro"])
+def test_mode_forwarded_to_run_text_and_run_image(ego, chrome, tmp_path, mode):
+    llm = ChatGPTWebLLM(browser="chrome", mode=mode, plan="pro")
+    llm.complete("q")
+    llm.generate_image("q", tmp_path / "out")
+    assert [k["mode"] for k in chrome.kwargs] == [mode, mode]
+
+
+def test_mode_reaches_the_ego_script(ego):
+    ChatGPTWebLLM(browser="ego", mode="thinking").complete("q")
+    line = next(l for l in (ego.dir / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    assert json.loads(line[len("const ARGS = "):].rstrip(";"))["mode"] == "thinking"
 
 
 def test_constructor_spawns_nothing(ego):

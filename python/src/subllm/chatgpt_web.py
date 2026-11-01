@@ -14,7 +14,9 @@ from subllm.preflight import RegionGuard
 
 _PLANS = ("free", "plus", "pro")
 _BROWSERS = ("auto", "ego", "chrome")
+_MODES = ("default", "thinking", "pro")
 _DEFAULT_TIMEOUT_S = 600.0
+_PRO_TIMEOUT_S = 2700.0
 _IMAGE_INSTRUCTION = "Generate an image: "
 
 
@@ -27,19 +29,21 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
         region_guard: RegionGuard | None = None,
         timeout_s: float | None = None,
     ) -> None:
-        if mode != "default":
-            raise ValueError(
-                f"unsupported mode {mode!r}: only 'default' is available; other modes arrive in a later release"
-            )
+        if mode not in _MODES:
+            raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         if plan not in _PLANS:
             raise ValueError(f"plan must be one of {_PLANS}, got {plan!r}")
         if browser not in _BROWSERS:
             raise ValueError(f"browser must be one of {_BROWSERS}, got {browser!r}")
+        if mode == "pro" and plan != "pro":
+            raise ValueError(f"mode 'pro' needs plan='pro' (got {plan!r})")
         self._mode = mode
         self._plan = plan
         self._browser = browser
         self._guard = region_guard
-        self._timeout_s = _DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
+        if timeout_s is None:
+            timeout_s = _PRO_TIMEOUT_S if mode == "pro" else _DEFAULT_TIMEOUT_S
+        self._timeout_s = timeout_s
         self._driver: EgoDriver | ChromeDriver | None = None
 
     def _resolve_driver(self) -> EgoDriver | ChromeDriver:
@@ -74,7 +78,7 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
             raise ClientError("the prompt is empty")
         driver = self._resolve_driver()
         driver.check_guide()
-        result = driver.run_text(prompt, timeout_s=self._timeout_s)
+        result = driver.run_text(prompt, timeout_s=self._timeout_s, mode=self._mode)
         if not result.text.strip():
             raise OutputError("chatgpt.com returned an empty answer")
         return result
@@ -87,7 +91,9 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
         dest = prepare_out_dir(out_dir)
         driver = self._resolve_driver()
         driver.check_guide()
-        return driver.run_image(_IMAGE_INSTRUCTION + prompt, dest, timeout_s=self._timeout_s)
+        return driver.run_image(
+            _IMAGE_INSTRUCTION + prompt, dest, timeout_s=self._timeout_s, mode=self._mode
+        )
 
     def complete(self, prompt: str) -> str:
         return self.complete_result(prompt).text

@@ -1,11 +1,13 @@
 """Minimal CLI for smoke-testing both clients (and shell-out from non-Python).
 
     subllm complete       --client codex|claude [--model M] [--effort E] [PROMPT]
-    subllm complete       --client chatgpt-web [--browser auto|ego|chrome] [PROMPT]
+    subllm complete       --client chatgpt-web [--browser auto|ego|chrome]
+                          [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
     subllm complete-json  --client codex|claude|chatgpt-web [--schema schema.json] [PROMPT]
     subllm web-agent      --client codex|claude --model M [--tools web|none]
                           [--schema schema.json] [--timeout S] [PROMPT]
-    subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome] [PROMPT]
+    subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome]
+                          [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 
 PROMPT is read from the argument, or stdin when omitted / '-'.
 
@@ -13,12 +15,14 @@ PROMPT is read from the argument, or stdin when omitted / '-'.
 success, and a typed error JSON on stdout (never stderr) on failure. The older
 subcommands keep their human-facing behaviour, errors on stderr. For
 `--client chatgpt-web` and `image --route web` the stderr line is `error: <Type>: <message>`, and a
-HumanActionRequired (log in, solve a challenge) exits 3.
+HumanActionRequired (log in, solve a challenge) exits 3. `--mode` and `--plan` apply
+to the web route only; the plan defaults to $SUBLLM_CHATGPT_PLAN, then "plus".
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from subllm.errors import (
@@ -40,7 +44,22 @@ def _read_prompt(arg: str | None) -> str:
     return sys.stdin.read()
 
 
-def _build_client(name: str, args: argparse.Namespace):
+_PLAN_CHOICES = ["free", "plus", "pro"]
+_MODE_CHOICES = ["default", "thinking", "pro"]
+
+
+def _web_mode_plan(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
+    plan = args.plan
+    if plan is None:
+        plan = os.environ.get("SUBLLM_CHATGPT_PLAN") or "plus"
+        if plan not in _PLAN_CHOICES:
+            parser.error(
+                f"SUBLLM_CHATGPT_PLAN must be one of {', '.join(_PLAN_CHOICES)}, got {plan!r}"
+            )
+    return args.mode or "default", plan
+
+
+def _build_client(name: str, args: argparse.Namespace, parser: argparse.ArgumentParser):
     if name == "codex":
         from subllm.codex import CodexLLM
         return CodexLLM(model=args.model, reasoning_effort=args.effort or "medium")
@@ -49,7 +68,11 @@ def _build_client(name: str, args: argparse.Namespace):
         return ClaudeLLM(model=args.model)
     if name == "chatgpt-web":
         from subllm.chatgpt_web import ChatGPTWebLLM
-        return ChatGPTWebLLM(browser=args.browser or "auto")
+        mode, plan = _web_mode_plan(parser, args)
+        try:
+            return ChatGPTWebLLM(mode=mode, plan=plan, browser=args.browser or "auto")
+        except ValueError as e:
+            parser.error(str(e))
     raise SystemExit(f"unknown client: {name!r} (expected codex|claude|chatgpt-web)")
 
 
@@ -191,10 +214,14 @@ def _report_web_error(e: SubllmError) -> int:
     return 3 if isinstance(e, HumanActionRequired) else 1
 
 
-def _run_image(args: argparse.Namespace) -> int:
+def _run_image(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.route == "web":
         from subllm.chatgpt_web import ChatGPTWebLLM
-        client = ChatGPTWebLLM(browser=args.browser or "auto")
+        mode, plan = _web_mode_plan(parser, args)
+        try:
+            client = ChatGPTWebLLM(mode=mode, plan=plan, browser=args.browser or "auto")
+        except ValueError as e:
+            parser.error(str(e))
     else:
         from subllm.codex import CodexLLM
         client = CodexLLM()
@@ -227,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--model", default=None)
         p.add_argument("--effort", default=None)
         p.add_argument("--browser", default=None, choices=["auto", "ego", "chrome"])
+        p.add_argument("--mode", default=None, choices=_MODE_CHOICES)
+        p.add_argument("--plan", default=None, choices=_PLAN_CHOICES)
         p.add_argument("--schema", default=None, help="JSON-schema file (complete-json)")
         p.add_argument("prompt", nargs="?", default=None)
 
@@ -241,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
     i = sub.add_parser("image")
     i.add_argument("--route", required=True, choices=["codex", "web"])
     i.add_argument("--browser", default=None, choices=["auto", "ego", "chrome"])
+    i.add_argument("--mode", default=None, choices=_MODE_CHOICES)
+    i.add_argument("--plan", default=None, choices=_PLAN_CHOICES)
     i.add_argument("-o", "--out-dir", required=True)
     i.add_argument("prompt", nargs="?", default=None)
 
@@ -251,15 +282,19 @@ def main(argv: list[str] | None = None) -> int:
                 for flag in ("model", "effort"):
                     if getattr(args, flag) is not None:
                         parser.error(f"--{flag} is not supported with --client chatgpt-web")
-            elif args.browser is not None:
-                parser.error("--browser is only supported with --client chatgpt-web")
-        if args.cmd == "image" and args.route == "codex" and args.browser is not None:
-            parser.error("--browser is only supported with --route web")
+            else:
+                for flag in ("browser", "mode", "plan"):
+                    if getattr(args, flag) is not None:
+                        parser.error(f"--{flag} is only supported with --client chatgpt-web")
+        if args.cmd == "image" and args.route == "codex":
+            for flag in ("browser", "mode", "plan"):
+                if getattr(args, flag) is not None:
+                    parser.error(f"--{flag} is only supported with --route web")
         if args.cmd == "web-agent":
             return _run_web_agent(args)
         if args.cmd == "image":
-            return _run_image(args)
-        client = _build_client(args.client, args)
+            return _run_image(args, parser)
+        client = _build_client(args.client, args, parser)
         prompt = _read_prompt(args.prompt)
         if args.cmd == "complete":
             sys.stdout.write(client.complete(prompt))

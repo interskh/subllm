@@ -439,3 +439,22 @@ implement-loop: slice 4 shipped d96d7eb; remaining: [5]
 **Touches**
 - `drivers/chatgpt_web/{page_core.js,ego_run.js,ego.py,chrome.py}`, tests `test_chatgpt_web_{core,ego,chrome}.py`, fixtures `redesign-picker-*.html`, `sanitize.py` (UI_TEXT).
 - Shared surface: `ARGS.mode` in the generated script; driver method signatures gain `mode=`; `ego.classify` downgrade mapping; page_core exports `selectMode`, `auditModel`.
+
+### T2 — ChatGPTWebLLM mode/plan/timeouts + CLI flags
+
+**Decisions**
+- Constructor order: mode set, plan set, browser set, then the pro gate, so a bad plan always gets the plan message. Gate text: `mode 'pro' needs plan='pro' (got 'plus')`. Timeout default 2700 s for pro, 600 s otherwise; explicit wins.
+- CLI: `_web_mode_plan` shared by complete/complete-json/image. Plan = `--plan`, else `$SUBLLM_CHATGPT_PLAN` (empty counts as unset), else plus. An invalid env value errors only when the flag is absent and the web route is used (rc 2 naming the variable).
+- Constructor ValueError -> `parser.error` inside the existing `try`; the `SystemExit` handler returns rc 2. `--mode/--plan` with codex/claude/`--route codex` -> parser.error, same wording pattern as `--browser`; `--browser` is checked first so its message is unchanged.
+- FakeChrome now records `{timeout_s, mode}` per call; timeouts/mode asserted at the driver call.
+
+**Rejected**
+- Validating the env var for non-web clients (spec: env alone never errors there).
+- Gate in the CLI instead of the constructor (library callers need it too).
+
+**Assumptions**
+- `ModelDowngradeError` prints via the existing `_report_web_error` as `error: ModelDowngradeError: ...` rc 1 (tested through ego stub, text and image). The downgrade text is not printed by the CLI (not asked).
+
+**Deferred**: README/drivers-contract docs for the flags (not in T2 file list); live pro run (T3).
+
+**Touches**: `python/src/subllm/{chatgpt_web,cli}.py`, tests `test_chatgpt_web_llm.py`, `test_cli_chatgpt_web.py`, `test_cli_image.py`. Shared: CLI flags `--mode/--plan`, env `SUBLLM_CHATGPT_PLAN`, `ChatGPTWebLLM` constructor contract. Mutants 10/10 caught.
