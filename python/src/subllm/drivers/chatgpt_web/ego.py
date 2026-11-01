@@ -78,7 +78,14 @@ def _sniff(head: bytes) -> str | None:
 
 
 def build_script(
-    prompt: str, *, space: str, timeout_ms: int, keypress_file: str, kind: str = "text", image_dir: str | None = None
+    prompt: str,
+    *,
+    space: str,
+    timeout_ms: int,
+    keypress_file: str,
+    kind: str = "text",
+    image_dir: str | None = None,
+    mode: str = "default",
 ) -> str:
     args = {
         "prompt": prompt,
@@ -87,6 +94,7 @@ def build_script(
         "keypress_file": keypress_file,
         "kind": kind,
         "image_dir": image_dir,
+        "mode": mode,
     }
     try:
         core = (_HERE / "page_core.js").read_text()
@@ -166,8 +174,8 @@ class EgoDriver:
             )
         self._guide_ok = True
 
-    def run_text(self, prompt: str, *, timeout_s: float) -> WebTextResult:
-        res = self._run(prompt, timeout_s, "text", None)
+    def run_text(self, prompt: str, *, timeout_s: float, mode: str = "default") -> WebTextResult:
+        res = self._run(prompt, timeout_s, "text", None, mode)
         return WebTextResult(
             text=res.get("text") or "",
             format=res.get("format") or "plain",
@@ -175,17 +183,17 @@ class EgoDriver:
             conversation_url=res["conversation_url"],
         )
 
-    def run_image(self, prompt: str, dest: Path, *, timeout_s: float) -> ImageResult:
-        return self._run(prompt, timeout_s, "image", dest)
+    def run_image(self, prompt: str, dest: Path, *, timeout_s: float, mode: str = "default") -> ImageResult:
+        return self._run(prompt, timeout_s, "image", dest, mode)
 
-    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
+    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
         with chatgpt_lock(timeout_s):
-            return self._run_locked(prompt, timeout_s, kind, dest)
+            return self._run_locked(prompt, timeout_s, kind, dest, mode)
 
-    def _run_locked(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
+    def _run_locked(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
         tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
         keypress = tmpdir / "keypress"
         try:
@@ -196,6 +204,7 @@ class EgoDriver:
                 keypress_file=str(keypress),
                 kind=kind,
                 image_dir=str(tmpdir),
+                mode=mode,
             )
             budget = timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
             out = err = ""
@@ -321,7 +330,7 @@ def classify(
             detail or "model downgrade",
             text=res.get("text") or "",
             served_model=res.get("served_model"),
-            requested_mode=None,
+            requested_mode=res.get("requested_mode"),
         )
     raise SendUnconfirmedError(
         f"send key pressed; outcome unconfirmed ({kind}): {detail}", conversation_url=url

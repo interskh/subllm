@@ -30,6 +30,9 @@ UI_TEXT = {
     "Take a photo", "Temporary chat", "Thinking", "Thinking effort", "Ultra",
     "What should we work on?", "Work", "Work with ChatGPT", "You", "You said:",
     "Send prompt", "Retry", "Unknown error", "GPT-6.1 Sol", "?",
+    "Instant", "Pro", "Power", "Medium, 2 of 5.", "Pro, 5 of 5.",
+    "Use Left and Right arrow keys to adjust power", "Locked, opens access options",
+    "Usage limit reached", "GPT-6", "GPT-5.6 Sol",
 }
 
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)

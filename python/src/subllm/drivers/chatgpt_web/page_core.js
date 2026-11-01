@@ -227,5 +227,53 @@
     return (el && el.getAttribute("data-message-model-slug")) || null;
   };
 
-  return { state, composerMatches, acceptance, turnStatus, captureText, servedModel };
+  // The model picker is a step planner: it never dispatches events (Radix opens on real pointer input),
+  // the substrate performs each returned action with real input and calls again.
+  const LEVELS = ["Instant", "Medium", "High", "Extra High", "Pro"];
+  const MODE_LABELS = { thinking: "Medium", pro: "Pro" }; // first thing to edit when the picker changes
+  const PICKER_SEL = "button[aria-label='Select ChatGPT model']";
+  const SLIDER_SEL = "[role=menu] [data-reasoning-slider]";
+  const live = (el) => !el.closest("[inert], [aria-hidden=true]");
+  // The label is the last text-bearing leaf: a placeholder ("Thinking effort") sits before it in the DOM,
+  // and innerText runs the two together when layout does not break the line.
+  const triggerLabel = (trigger) => {
+    const leaves = q(trigger, "*").filter((e) => e.children.length === 0 && (e.textContent || "").trim());
+    return leaves.length ? leaves[leaves.length - 1].textContent.trim() : "";
+  };
+
+  const selectMode = (target) => {
+    const label = Object.prototype.hasOwnProperty.call(MODE_LABELS, target) ? MODE_LABELS[target]
+      : LEVELS.includes(target) ? target : null;
+    const out = (o) => ({ current: null, ...o });
+    if (!label) return out({ action: "fail", detail: "unknown mode: " + target });
+    const trigger = firstRendered(document, PICKER_SEL);
+    if (!trigger) return out({ action: "fail", detail: "model picker not found" });
+    const menu = q(document, "[role=menu][data-state=open]").find((m) => m.isConnected && live(m));
+    if (menu) {
+      const row = q(menu, "[data-reasoning-slider]").find(live);
+      if (!row) return out({ action: "key", key: "Escape" });
+      const status = q(menu, "[role=status]").find(live);
+      const m = status && (status.textContent || "").trim().match(/^(.+), \d+ of \d+\.?$/);
+      const current = m ? m[1] : null;
+      if (!LEVELS.includes(current)) return out({ action: "fail", detail: "unknown picker level: " + current, current });
+      if (current === label) return out({ action: "key", key: "Escape", current });
+      if (row.querySelector("[data-locked='true']")) return out({ action: "fail", detail: "picker is locked", current });
+      if (!(document.activeElement && document.activeElement.closest("[data-reasoning-slider]"))) {
+        return out({ action: "focus", selector: SLIDER_SEL, current });
+      }
+      return out({ action: "key", key: LEVELS.indexOf(label) > LEVELS.indexOf(current) ? "ArrowRight" : "ArrowLeft", current });
+    }
+    const current = triggerLabel(trigger);
+    if (!LEVELS.includes(current)) return out({ action: "fail", detail: "unknown picker level: " + current, current });
+    if (current === label) return out({ action: "done", selected_label: current, current });
+    return out({ action: "click", selector: PICKER_SEL, current });
+  };
+
+  const auditModel = (mode, served) => {
+    if (!served) return "unverified";
+    if (mode !== "pro") return "ok";
+    return /\bpro\b/i.test(served) ? "ok" : "downgrade";
+  };
+
+  return { state, composerMatches, acceptance, turnStatus, captureText, servedModel, selectMode, auditModel };
 })()

@@ -145,10 +145,11 @@ def call_core(page, name: str, *args, main_world: bool = False):
 
 
 class _Stop(Exception):
-    def __init__(self, kind: str, detail: str) -> None:
+    def __init__(self, kind: str, detail: str, extra: dict | None = None) -> None:
         super().__init__(detail)
         self.kind = kind
         self.detail = detail
+        self.extra = extra or {}
 
 
 class _Rec:
@@ -173,8 +174,8 @@ class ChromeDriver:
     def check_guide(self) -> None:
         return None
 
-    def run_text(self, prompt: str, *, timeout_s: float) -> WebTextResult:
-        res = self._run(prompt, timeout_s, "text", None)
+    def run_text(self, prompt: str, *, timeout_s: float, mode: str = "default") -> WebTextResult:
+        res = self._run(prompt, timeout_s, "text", None, mode)
         return WebTextResult(
             text=res.get("text") or "",
             format=res.get("format") or "plain",
@@ -182,22 +183,22 @@ class ChromeDriver:
             conversation_url=res["conversation_url"],
         )
 
-    def run_image(self, prompt: str, dest: Path, *, timeout_s: float) -> ImageResult:
-        return self._run(prompt, timeout_s, "image", dest)
+    def run_image(self, prompt: str, dest: Path, *, timeout_s: float, mode: str = "default") -> ImageResult:
+        return self._run(prompt, timeout_s, "image", dest, mode)
 
-    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
+    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
         with chatgpt_lock(timeout_s):
             tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
             try:
-                res = self._run_locked(prompt, timeout_s, kind, tmpdir)
+                res = self._run_locked(prompt, timeout_s, kind, tmpdir, mode)
                 return res if kind == "text" else _collect_images(res, tmpdir, dest)
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _run_locked(self, prompt: str, timeout_s: float, kind: str, tmpdir: Path) -> dict:
+    def _run_locked(self, prompt: str, timeout_s: float, kind: str, tmpdir: Path, mode: str = "default") -> dict:
         profile = profile_dir()
         stack = contextlib.ExitStack()
         try:
@@ -235,9 +236,9 @@ class ChromeDriver:
         timer.start()
         try:
             try:
-                result = _flow(ctx, prompt, timeout_s, kind, tmpdir, rec)
+                result = _flow(ctx, prompt, timeout_s, kind, tmpdir, rec, mode)
             except _Stop as s:
-                result = _fail(rec, s.kind, s.detail)
+                result = _fail(rec, s.kind, s.detail, s.extra)
             except Exception as e:
                 result = _fail(rec, "client", f"{type(e).__name__}: {e}")
         finally:
@@ -257,7 +258,7 @@ class ChromeDriver:
         return classify(rec.events, [result], 0, rec.sent, None if result.get("ok") else (expired[0] if expired else None), "", "chrome")
 
 
-def _fail(rec: _Rec, kind: str, detail: str) -> dict:
+def _fail(rec: _Rec, kind: str, detail: str, extra: dict | None = None) -> dict:
     return {
         "ok": False,
         "kind": kind,
@@ -265,11 +266,55 @@ def _fail(rec: _Rec, kind: str, detail: str) -> dict:
         "conversation_url": rec.url,
         "text": None,
         "served_model": None,
+        **(extra or {}),
     }
 
 
-def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec) -> dict:
+class _Picker:
+    """Drives the page_core selectMode planner with real input: click/focus/key, bounded."""
+
+    def __init__(self, page) -> None:
+        self.page = page
+        self.restore_to: str | None = None
+
+    def run(self, target: str) -> tuple[bool, str | None, str | None, str | None]:
+        first = None
+        for _ in range(16):
+            s = call_core(self.page, "selectMode", target)
+            if first is None:
+                first = s.get("current")
+            action = s.get("action")
+            if action == "done":
+                return True, first, s.get("selected_label"), None
+            if action == "fail":
+                return False, first, None, s.get("detail")
+            if action == "click":
+                self.page.click(s["selector"])
+            elif action == "focus":
+                self.page.focus(s["selector"])
+            elif action == "key":
+                self.page.keyboard.press(s["key"])
+            else:
+                return False, first, None, "unknown picker action"
+            _sleep(0.35)
+        return False, first, None, None
+
+    def restore(self) -> None:
+        with contextlib.suppress(Exception):
+            self.run(self.restore_to)
+
+
+def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str = "default") -> dict:
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    picker = _Picker(page)
+    try:
+        return _flow_steps(page, picker, prompt, timeout_s, kind, tmpdir, rec, mode)
+    finally:
+        if picker.restore_to and not rec.dead:
+            picker.restore()
+
+
+def _flow_steps(page, picker: _Picker, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str) -> dict:
     core = lambda name, *a, **kw: call_core(page, name, *a, **kw)  # noqa: E731
     is_chat = lambda: re.search(r"/c/", urlparse(page.url).path) is not None  # noqa: E731
 
@@ -312,6 +357,18 @@ def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec
         raise _Stop("client", "page is busy before the send")
     if is_chat():
         raise _Stop("client", "not a new chat")
+
+    if mode != "default":
+        ok, first, label, detail = picker.run(mode)
+        if first and (not ok or first != label):
+            picker.restore_to = first
+        if not ok:
+            raise _Stop("client", f"mode selection failed: {detail}" if detail else "mode selection unconfirmed")
+        after = core("state")
+        if after.get("quota"):
+            raise _Stop("quota", "usage limit reached")
+        if not after.get("logged_in") or after.get("mode_surface") != "chat" or after.get("busy"):
+            raise _Stop("client", "Chat mode not confirmed after mode selection")
 
     has_pm = page.evaluate("!!document.querySelector('div.ProseMirror[role=textbox]')")
     page.click("div.ProseMirror[role=textbox]" if has_pm else "#prompt-textarea")
@@ -383,6 +440,12 @@ def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec
     if not image and not (cap and str(cap.get("text") or "").strip()):
         raise _Stop("output", "empty answer")
     served = core("servedModel", turn_key)
+    if mode != "default" and core("auditModel", mode, served) == "downgrade":
+        raise _Stop(
+            "downgrade",
+            f"requested {mode}, served {served}",
+            {"text": (cap or {}).get("text") or "", "served_model": served, "requested_mode": mode},
+        )
     images: list[str] = []
     if image:
         for i, src in enumerate(ts.get("images") or [], 1):

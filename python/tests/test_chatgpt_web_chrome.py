@@ -17,6 +17,7 @@ from subllm.drivers.chatgpt_web.ego import lock_path
 from subllm.errors import (
     ClientError,
     HumanActionRequired,
+    ModelDowngradeError,
     OutputError,
     QuotaError,
     SendUnconfirmedError,
@@ -68,6 +69,9 @@ class Page:
         self.log.append(("goto", url, kw))
         if self.fail_on == "goto-timeout":
             raise type("TimeoutError", (Exception,), {})("Timeout 15000ms exceeded")
+
+    def focus(self, sel):
+        self.log.append(("focus", sel))
 
     def click(self, sel, **kw):
         self.log.append(("click", sel))
@@ -820,3 +824,127 @@ def test_call_does_not_finish_while_the_kill_callback_is_running(chrome, monkeyp
     assert run().text == "hello"
     assert state["done"], "the call returned while the kill callback was still running"
     time.sleep(0.2)
+
+
+CLICK = {"action": "click", "selector": "button[aria-label='Select ChatGPT model']", "current": "Medium"}
+FOCUS = {"action": "focus", "selector": "[role=menu] [data-reasoning-slider]", "current": "Medium"}
+RIGHT = {"action": "key", "key": "ArrowRight", "current": "Medium"}
+ESC = {"action": "key", "key": "Escape", "current": "Medium"}
+DONE_PRO = {"action": "done", "selected_label": "Pro", "current": "Pro"}
+DONE_MED = {"action": "done", "selected_label": "Medium", "current": "Medium"}
+RESTORE = [
+    {"action": "click", "selector": "s", "current": "Pro"},
+    {"action": "key", "key": "ArrowLeft", "current": "Pro"},
+    DONE_MED,
+]
+PICK_PRO = [CLICK, FOCUS, RIGHT, RIGHT, RIGHT, RIGHT, ESC, DONE_PRO]
+
+
+def picker_log(log):
+    return [e for e in log if isinstance(e, tuple) and e[0] in ("click", "focus", "press")]
+
+
+def test_default_mode_never_calls_the_picker(chrome):
+    page = chrome({"selectMode": [DONE_PRO], "auditModel": "downgrade"})
+    run()
+    assert "selectMode" not in page.calls and "auditModel" not in page.calls
+    assert not [e for e in chrome.log if e[0:1] == ("focus",)]
+
+
+def test_pro_mode_selects_with_real_input_before_the_composer(chrome):
+    page = chrome({"selectMode": PICK_PRO + RESTORE, "auditModel": "ok", "servedModel": "GPT-6 Pro"})
+    r = ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert r.text == "hello"
+    acts = picker_log(chrome.log)
+    assert acts[:7] == [
+        ("click", CLICK["selector"]), ("focus", FOCUS["selector"]),
+        ("press", "ArrowRight"), ("press", "ArrowRight"), ("press", "ArrowRight"), ("press", "ArrowRight"),
+        ("press", "Escape"),
+    ]
+    assert acts[7] == ("click", "div.ProseMirror[role=textbox]")
+    assert chrome.log.index(("type", "hi", 40)) > chrome.log.index(("press", "Escape"))
+    assert page.calls.count("selectMode") == 8 + 3 and page.calls.count("auditModel") == 1
+    assert ("press", "ArrowLeft") in chrome.log
+
+
+def test_picker_fail_is_client_error_before_any_key_event(chrome):
+    chrome({"selectMode": [{"action": "fail", "detail": "picker is locked", "current": None}]})
+    with pytest.raises(ClientError, match="mode selection failed: picker is locked") as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert type(ei.value) is ClientError
+    assert not typed(chrome.log)
+
+
+def test_picker_step_bound_is_client_error_and_restore_is_bounded(chrome):
+    page = chrome({"selectMode": [RIGHT]})
+    with pytest.raises(ClientError, match="mode selection unconfirmed"):
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert page.calls.count("selectMode") == 32
+    assert not [e for e in chrome.log if e[0:1] == ("type",)] and ("press", "Enter") not in chrome.log
+
+
+@pytest.mark.parametrize(
+    "bad,exc",
+    [
+        ({**LOGGED_IN, "mode_surface": "work"}, ClientError),
+        ({**LOGGED_IN, "busy": True}, ClientError),
+        ({**LOGGED_IN, "logged_in": False}, ClientError),
+        ({**LOGGED_IN, "quota": True}, QuotaError),
+    ],
+)
+def test_post_selection_state_must_be_chat(chrome, bad, exc):
+    chrome({"selectMode": [DONE_PRO, DONE_MED], "state": [LOGGED_IN, bad]})
+    with pytest.raises(exc) as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert type(ei.value) is exc
+    assert not typed(chrome.log)
+
+
+def test_downgrade_carries_text_served_model_and_requested_mode(chrome):
+    chrome({"selectMode": [DONE_PRO, DONE_MED], "auditModel": "downgrade", "servedModel": "GPT-6 Thinking"})
+    with pytest.raises(ModelDowngradeError) as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    e = ei.value
+    assert (e.text, e.served_model, e.requested_mode) == ("hello", "GPT-6 Thinking", "pro")
+
+
+def test_downgrade_audit_runs_before_the_image_fetch(chrome, tmp_path):
+    chrome(
+        {"selectMode": [DONE_PRO, DONE_MED], "auditModel": "downgrade", "turnStatus": {**DONE, "images": ["blob:a"]}},
+        fetch={"blob:a": "AAAA"},
+    )
+    with pytest.raises(ModelDowngradeError):
+        ChromeDriver().run_image("hi", tmp_path / "o.png", timeout_s=5, mode="pro")
+    assert not (tmp_path / "o.png").exists()
+
+
+def test_restore_runs_when_the_level_changed_even_after_a_failure(chrome):
+    page = chrome({"selectMode": [CLICK, DONE_PRO] + RESTORE, "auditModel": "downgrade"})
+    with pytest.raises(ModelDowngradeError):
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert page.calls.count("selectMode") == 5 and ("press", "ArrowLeft") in chrome.log
+    assert chrome.log[-1] == "close"
+
+
+def test_restore_is_skipped_when_the_level_is_unchanged(chrome):
+    page = chrome({"selectMode": [DONE_PRO], "auditModel": "ok"})
+    ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert page.calls.count("selectMode") == 1
+
+
+def test_throwing_restore_does_not_change_the_result(chrome):
+    def boom():
+        raise RuntimeError("target closed")
+
+    calls = [CLICK, DONE_PRO]
+    page = chrome({"selectMode": lambda: calls.pop(0) if calls else boom(), "auditModel": "ok"})
+    assert ChromeDriver().run_text("hi", timeout_s=5, mode="pro").text == "hello"
+    assert page.calls.count("selectMode") == 3
+
+
+def test_restore_is_skipped_when_the_browser_is_dead(chrome):
+    rec = mod._Rec()
+    rec.dead = True
+    page = chrome({"selectMode": [CLICK, DONE_PRO] + RESTORE, "auditModel": "ok"})
+    mod._flow(Ctx(page), "hi", 5, "text", Path("/nonexistent"), rec, "pro")
+    assert page.calls.count("selectMode") == 2

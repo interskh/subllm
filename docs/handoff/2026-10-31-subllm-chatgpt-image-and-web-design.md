@@ -407,3 +407,35 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 - Deferred: the Chrome launch itself is not under the watchdog; the login helper ends when its first tab closes; any flock OSError is treated as "lock held" (now both drivers); the SingletonLock pid format and the kill are unverified against a running Chrome; Windows has no SingletonLock, so the watchdog kill is a no-op there; live Chrome text and image turns, main-world captureText and the blob: fetch on the real chatgpt.com page are unverified. Earlier slices' deferred items remain open.
 
 implement-loop: slice 4 shipped d96d7eb; remaining: [5]
+
+## Slice 5 — Modes and plan
+
+### T1 — mode selection and downgrade audit in the web driver
+
+**Decisions**
+- `selectMode(target)` is a pure step planner (returns `{action: click|focus|key|done|fail, selector?, key?, current, selected_label?, detail?}`), not the spec table's "opens, selects, reads back; returns {ok, selected_label}". Reason: Radix opens on real pointer input and synthetic events are the known failure mode (D-3/D-3a), so the substrate performs each step with real input and re-asks. Read-back guarantee kept: only `done` (closed trigger label == target) counts as selected.
+- Trigger label = last text-bearing LEAF element of the trigger, not the last `innerText` line. The sanitized Pro captures put the hidden "Thinking effort" placeholder inline, so `innerText` reads "Thinking effortPro" (no newline without the live CSS). DOM order (placeholder, then label) holds in all three captured states.
+- `auditModel(mode, served)`: unverified (null/empty) / ok (mode != pro) / pro needs `\bpro\b` else downgrade. Substrates call it only when mode != default (default path stays byte-identical, no new evaluate).
+- Substrates: `runPicker`/`_Picker.run` bounded 16 steps, 350 ms between; restore target = first step's `current`, set when it differs from the selected label or the selection failed (so an opened menu is closed again). Restore runs in ego `finally` before `finish` (skipped for human_action) and in chrome `_flow` `finally` (skipped when `rec.dead`); errors swallowed (ego logs a line).
+- Picker runs after the pre-send checks and `isChat`, before composer focus and the keypress record; post-selection `state()` must be logged in / chat / not busy (quota -> `quota`).
+- Downgrade: `kind downgrade` with `text`, `served_model`, `requested_mode` via Stop extra (ego) and a new `_Stop.extra` (chrome); audit runs right after `servedModel`, before any image fetch. `ego.classify` now passes `requested_mode`.
+- `run_text/run_image/_run/_run_locked/_flow/build_script` take `mode="default"`; `_flow` split into `_flow` (restore wrapper) + `_flow_steps` (old body) to avoid re-indenting.
+- Fixtures: `redesign-picker-{open-medium,open-pro,closed-pro}.html` sanitized with new UI_TEXT entries; residue reviewed (only generic UI strings; "/home" hits are Tailwind class names).
+
+**Rejected**
+- `data-selected-reasoning-effort` for readback (live: said medium while the label said Pro).
+- Synthetic dispatch of pointer/key events from page_core (Radix ignores it; D-3a).
+- A `quotaDialog` guard for `[role=menu]` descendants: the fixture test passes without it (the menu sits in no dialog/alert), so it was removed as unneeded code.
+- `innerText` last line for the label (see Decisions).
+
+**Assumptions**
+- The live picker animation settles within the 350 ms step sleep, and the trigger shows one label at a time (no cross-fade of two leaves). Unverified; T3 live run checks. A cross-fade would make the planner see a wrong `current`; `done` could then be wrong only if the stale leaf equals the target.
+- ego `page.focus(selector)` and `page.click(selector, {label})` exist as the brief states; chrome `page.focus` is standard patchright. Neither was run against the real chatgpt.com.
+- Open-menu detection does not require `rendered` (a fading menu stays `data-state=open`), only connected and outside `[inert]`/`[aria-hidden=true]`; the trigger itself must be rendered and is read even inside aria-hidden main (Radix hides siblings while open).
+
+**Deferred**
+- `servedModel` for Pro turns (T3 after the live run). `chatgpt_web.py`/`cli.py` wiring of `mode` (T2). Mode with `image` kind has only fake-page coverage.
+
+**Touches**
+- `drivers/chatgpt_web/{page_core.js,ego_run.js,ego.py,chrome.py}`, tests `test_chatgpt_web_{core,ego,chrome}.py`, fixtures `redesign-picker-*.html`, `sanitize.py` (UI_TEXT).
+- Shared surface: `ARGS.mode` in the generated script; driver method signatures gain `mode=`; `ego.classify` downgrade mapping; page_core exports `selectMode`, `auditModel`.

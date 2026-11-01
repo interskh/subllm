@@ -85,6 +85,22 @@ SHOW_STOP = (
     "(() => { document.querySelector('button[aria-label=\"Stop\"]').removeAttribute('hidden'); return true; })()"
 )
 
+FOCUS_POWER = (
+    "(() => { const r = document.querySelector('[role=menu] [data-reasoning-slider]'); r.focus();"
+    " return document.activeElement === r; })()"
+)
+LOCK_SLIDER = (
+    "(() => { document.querySelector('[data-locked]').setAttribute('data-locked', 'true'); return true; })()"
+)
+HIDE_MENU_SLIDER = (
+    "(() => { document.querySelector('[data-reasoning-slider]').closest('[data-active]').setAttribute('aria-hidden', 'true');"
+    " return true; })()"
+)
+INERT_SLIDER_ROW = (
+    "(() => { const r = document.querySelector('[data-reasoning-slider]');"
+    " r.parentElement.setAttribute('inert', ''); return true; })()"
+)
+
 DECODE_IMAGES = "(async () => { await Promise.all(Array.from(document.images).map(i => i.decode())); return true; })()"
 
 GROUPS = [
@@ -95,6 +111,51 @@ GROUPS = [
         ("cm_blank_between", call("composerMatches", "line one\n\nline two")),
         ("cm_one_line", call("composerMatches", "line one")),
         ("cm_crlf_nbsp", call("composerMatches", "line one  \r\nline two\r\n")),
+    ]),
+    ("redesign-idle-chat.html", [
+        ("pick_closed_medium_pro", call("selectMode", "pro")),
+        ("pick_closed_medium_thinking", call("selectMode", "thinking")),
+        ("pick_unknown", call("selectMode", "turbo")),
+        ("pick_inherited_key", call("selectMode", "constructor")),
+        ("pick_restore_level", call("selectMode", "Instant")),
+    ]),
+    ("redesign-picker-open-medium.html", [
+        ("pick_open_medium_unfocused", call("selectMode", "pro")),
+        ("open_menu_state", call("state")),
+        ("open_menu_turn", call("turnStatus", None, None)),
+        ("pre_focus_power", FOCUS_POWER),
+        ("pick_open_medium_pro", call("selectMode", "pro")),
+        ("pick_open_medium_instant", call("selectMode", "Instant")),
+        ("pick_open_medium_thinking", call("selectMode", "thinking")),
+        ("pre_lock_slider", LOCK_SLIDER),
+        ("pick_locked", call("selectMode", "pro")),
+        ("pick_locked_at_target", call("selectMode", "thinking")),
+    ]),
+    ("redesign-picker-open-medium.html", [
+        ("pre_inert_row", INERT_SLIDER_ROW),
+        ("pick_models_view", call("selectMode", "pro")),
+    ]),
+    ("redesign-picker-open-pro.html", [
+        ("pick_open_pro_pro", call("selectMode", "pro")),
+        ("pre_focus_power_pro", FOCUS_POWER),
+        ("pick_open_pro_thinking", call("selectMode", "thinking")),
+    ]),
+    ("redesign-picker-closed-pro.html", [
+        ("pick_closed_pro_pro", call("selectMode", "pro")),
+        ("pick_closed_pro_thinking", call("selectMode", "thinking")),
+        ("closed_pro_state", call("state")),
+    ]),
+    ("synthetic-logged-out.html", [("pick_no_trigger", call("selectMode", "pro"))]),
+    (COMPLETED, [
+        ("audit_null", call("auditModel", "pro", None)),
+        ("audit_empty", call("auditModel", "pro", "")),
+        ("audit_default", call("auditModel", "default", "GPT-6 Thinking")),
+        ("audit_thinking", call("auditModel", "thinking", "gpt-5-6-thinking")),
+        ("audit_pro_ok", call("auditModel", "pro", "GPT-6 Pro")),
+        ("audit_pro_slug", call("auditModel", "pro", "gpt-6-pro")),
+        ("audit_pro_down", call("auditModel", "pro", "GPT-6 Thinking")),
+        ("audit_pro_down_slug", call("auditModel", "pro", "gpt-5-6-thinking")),
+        ("audit_pro_word", call("auditModel", "pro", "gpt-6-professional")),
     ]),
     ("redesign-idle-work.html", [("work_state", call("state"))]),
     ("synthetic-logged-out.html", [("out_state", call("state"))]),
@@ -540,3 +601,74 @@ def test_chrome_capture_text_needs_the_main_world_through_call_core(tmp_path_fac
             ctx.close()
     assert out[True] == {"text": "**md** PINEAPPLE", "format": "markdown"}
     assert out[False]["format"] == "plain"
+
+
+def test_planner_closed_at_medium(r):
+    p = r["pick_closed_medium_pro"]
+    assert p == {"action": "click", "selector": "button[aria-label='Select ChatGPT model']", "current": "Medium"}
+    assert r["pick_closed_medium_thinking"] == {"action": "done", "selected_label": "Medium", "current": "Medium"}
+    assert r["pick_restore_level"]["action"] == "click"
+
+
+def test_planner_rejects_unknown_modes(r):
+    assert r["pick_unknown"]["action"] == "fail" and "unknown mode" in r["pick_unknown"]["detail"]
+    assert r["pick_inherited_key"]["action"] == "fail"
+
+
+def test_planner_open_medium_focuses_then_steps_by_direction(r):
+    f = r["pick_open_medium_unfocused"]
+    assert f == {"action": "focus", "selector": "[role=menu] [data-reasoning-slider]", "current": "Medium"}
+    assert r["pick_open_medium_pro"] == {"action": "key", "key": "ArrowRight", "current": "Medium"}
+    assert r["pick_open_medium_instant"] == {"action": "key", "key": "ArrowLeft", "current": "Medium"}
+
+
+def test_planner_closes_the_menu_once_at_the_target(r):
+    assert r["pick_open_medium_thinking"] == {"action": "key", "key": "Escape", "current": "Medium"}
+    assert r["pick_open_pro_pro"] == {"action": "key", "key": "Escape", "current": "Pro"}
+    assert r["pick_locked_at_target"]["action"] == "key" and r["pick_locked_at_target"]["key"] == "Escape"
+
+
+def test_planner_open_pro_steps_left_for_a_lower_level(r):
+    assert r["pick_open_pro_thinking"] == {"action": "key", "key": "ArrowLeft", "current": "Pro"}
+
+
+def test_planner_closed_at_pro_reads_the_trigger_label(r):
+    assert r["pick_closed_pro_pro"] == {"action": "done", "selected_label": "Pro", "current": "Pro"}
+    assert r["pick_closed_pro_thinking"]["action"] == "click" and r["pick_closed_pro_thinking"]["current"] == "Pro"
+
+
+def test_planner_never_trusts_the_selected_effort_attribute(r):
+    html = (FIXTURES / "redesign-picker-closed-pro.html").read_text()
+    # the live trigger attribute disagreed with its label; the label wins
+    assert 'data-selected-reasoning-effort="medium"' in html
+    assert r["pick_closed_pro_pro"]["current"] == "Pro"
+
+
+def test_planner_locked_slider_fails(r):
+    p = r["pick_locked"]
+    assert p["action"] == "fail" and "locked" in p["detail"] and p["current"] == "Medium"
+
+
+def test_planner_ignores_the_hidden_models_view(r):
+    assert r["pick_models_view"] == {"action": "key", "key": "Escape", "current": None}
+
+
+def test_planner_without_a_trigger_fails_closed(r):
+    p = r["pick_no_trigger"]
+    assert p["action"] == "fail" and "picker not found" in p["detail"]
+
+
+def test_open_picker_menu_is_not_a_quota_signal(r):
+    assert r["open_menu_state"]["quota"] is False
+    assert r["open_menu_state"]["logged_in"] is True
+    assert r["open_menu_turn"]["error_dialog"] is None
+    html = (FIXTURES / "redesign-picker-open-medium.html").read_text()
+    assert "Usage limit reached" in html
+
+
+def test_audit_model(r):
+    assert r["audit_null"] == "unverified" and r["audit_empty"] == "unverified"
+    assert r["audit_default"] == "ok" and r["audit_thinking"] == "ok"
+    assert r["audit_pro_ok"] == "ok" and r["audit_pro_slug"] == "ok"
+    assert r["audit_pro_down"] == "downgrade" and r["audit_pro_down_slug"] == "downgrade"
+    assert r["audit_pro_word"] == "downgrade"

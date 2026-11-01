@@ -20,12 +20,34 @@ class Stop extends Error {
 const stop = (kind, detail, extra) => { throw new Stop(kind, detail, extra); };
 
 let task = null;
+let page = null;
+let core = null;
 let outcome = "error";
 let conversationUrl = null;
+let restoreTo = null;
+const MODE = ARGS.mode || "default";
+
+// Drives the page_core selectMode planner with real input: click/focus/key, bounded.
+const runPicker = async (target) => {
+  let first = null;
+  for (let i = 0; i < 16; i++) {
+    const s = await core("selectMode", target);
+    if (first === null) first = s.current;
+    if (s.action === "done") return { ok: true, first, label: s.selected_label };
+    if (s.action === "fail") return { ok: false, first, detail: s.detail };
+    if (s.action === "click") await page.click(s.selector, { label: "open model picker" });
+    else if (s.action === "focus") await page.focus(s.selector);
+    else if (s.action === "key") await page.keyboard.press(s.key);
+    else return { ok: false, first, detail: "unknown picker action" };
+    await sleep(350);
+  }
+  return { ok: false, first, detail: null };
+};
+
 try {
   task = await taskSpace(ARGS.space);
-  const page = task.page("p1");
-  const core = (name, ...args) =>
+  page = task.page("p1");
+  core = (name, ...args) =>
     page.evaluate("(" + CORE + ")." + name + "(" + args.map((a) => JSON.stringify(a ?? null)).join(",") + ")");
   const isChat = async () => /\/c\//.test(new URL(await page.url()).pathname);
 
@@ -57,6 +79,17 @@ try {
   }
   if (st.busy) stop("client", "page is busy before the send");
   if (await isChat()) stop("client", "not a new chat");
+
+  if (MODE !== "default") {
+    const sel = await runPicker(MODE);
+    if (sel.first && (!sel.ok || sel.first !== sel.label)) restoreTo = sel.first;
+    if (!sel.ok) stop("client", sel.detail ? "mode selection failed: " + sel.detail : "mode selection unconfirmed");
+    const after = await core("state");
+    if (after.quota) stop("quota", "usage limit reached");
+    if (!after.logged_in || after.mode_surface !== "chat" || after.busy) {
+      stop("client", "Chat mode not confirmed after mode selection");
+    }
+  }
 
   const hasPm = await page.evaluate("!!document.querySelector('div.ProseMirror[role=textbox]')");
   await page.click(hasPm ? "div.ProseMirror[role=textbox]" : "#prompt-textarea", { label: "focus composer" });
@@ -127,6 +160,13 @@ try {
   const cap = await core("captureText", acc.turn_key);
   if (!image && (!cap || !String(cap.text || "").trim())) stop("output", "empty answer");
   const served = await core("servedModel", acc.turn_key);
+  if (MODE !== "default" && (await core("auditModel", MODE, served)) === "downgrade") {
+    stop("downgrade", "requested " + MODE + ", served " + served, {
+      text: (cap && cap.text) || "",
+      served_model: served,
+      requested_mode: MODE,
+    });
+  }
   const images = [];
   if (image) {
     for (const [i, src] of ts.images.entries()) {
@@ -168,6 +208,14 @@ try {
     });
   }
 } finally {
+  if (restoreTo && outcome !== "human_action" && page) {
+    try {
+      const back = await runPicker(restoreTo);
+      if (!back.ok) console.log("picker restore failed: " + (back.detail || "unconfirmed"));
+    } catch (e) {
+      console.log("picker restore failed: " + String((e && e.message) || e));
+    }
+  }
   try {
     if (task) {
       if (outcome === "human_action") await task.handOff();

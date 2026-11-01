@@ -12,6 +12,7 @@ import pytest
 from subllm.drivers.chatgpt_web.ego import EgoDriver, build_script, lock_path, parse_output
 from subllm.errors import (
     ClientError,
+    ModelDowngradeError,
     HumanActionRequired,
     OutputError,
     QuotaError,
@@ -826,3 +827,216 @@ def test_loop_text_mode_unchanged(tmp_path):
     p = subprocess.run(["node", str(prog)], capture_output=True, text=True, timeout=60)
     results = parse_output(p.stdout)[1]
     assert results[0]["ok"] is True and results[0]["images"] == [] and results[0]["text"] == "cap"
+
+
+_MODE_RUNTIME = r"""
+const __cfg = %CFG%;
+const __log = [];
+const __pick = { i: 0 };
+const __st = { i: 0 };
+const __typed = { done: false };
+const __next = (list, ix) => { const v = list[Math.min(ix.i, list.length - 1)]; ix.i += 1; return v; };
+let __t = Date.now(); Date.now = () => (__t += 1000);
+const __timer = setTimeout; globalThis.setTimeout = (f) => __timer(f, 0);
+process.on('exit', () => console.log('ACT_LOG ' + JSON.stringify(__log)));
+const __page = {
+  url: async () => (__typed.done ? "https://chatgpt.com/c/fake-id" : "https://chatgpt.com/"),
+  goto: async () => {},
+  cdp: async () => {},
+  fetch: async (src) => { __log.push("fetch " + src); return { ok: true }; },
+  click: async (sel) => { __log.push("click " + sel); },
+  focus: async (sel) => { __log.push("focus " + sel); },
+  keyboard: {
+    type: async () => { __log.push("type"); },
+    press: async (k) => { __log.push("press " + k); if (k === "Enter") __typed.done = true; },
+  },
+  evaluate: async (expr) => {
+    if (expr.startsWith("!!document")) return true;
+    const call = expr.slice(-80);
+    if (call.includes(").state(")) { __log.push("state"); return __next(__cfg.states, __st); }
+    if (call.includes(").selectMode(")) {
+      __log.push("selectMode " + JSON.parse(call.slice(call.indexOf(".selectMode(") + 12, -1)));
+      const v = __next(__cfg.picks, __pick);
+      if (v.throw) throw new Error(v.throw);
+      return v;
+    }
+    if (call.includes(").auditModel(")) { __log.push("auditModel"); return __cfg.audit; }
+    if (call.includes(").composerMatches(")) return true;
+    if (call.includes(").acceptance(")) return { state: "accepted", turn_key: "k", conversation_url: "https://chatgpt.com/c/fake-id" };
+    if (call.includes(").turnStatus(")) return { done: true, text: "t", stop_visible: false, images: __cfg.images, error_dialog: null };
+    if (call.includes(").captureText(")) return { text: "cap", format: "plain" };
+    if (call.includes(").servedModel(")) return __cfg.served;
+    throw new Error("unexpected evaluate: " + call);
+  },
+};
+const taskSpace = async () => ({ page: () => __page, finish: async () => { __log.push("finish"); }, handOff: async () => { __log.push("handoff"); } });
+"""
+
+_CHAT = {"logged_in": True, "login_prompt": False, "challenge": False, "mode_surface": "chat", "busy": False, "quota": False}
+
+
+def _act(current="Medium", **kw):
+    return {"current": current, **kw}
+
+
+_CLICK = _act(action="click", selector="button[aria-label='Select ChatGPT model']")
+_FOCUS = _act(action="focus", selector="[role=menu] [data-reasoning-slider]")
+_RIGHT = _act(action="key", key="ArrowRight")
+_ESC = _act(action="key", key="Escape")
+_DONE_PRO = _act("Pro", action="done", selected_label="Pro")
+_DONE_MED = _act("Medium", action="done", selected_label="Medium")
+_PRO_PATH = [_CLICK, _FOCUS, _RIGHT, _RIGHT, _RIGHT, _RIGHT, _ESC, _DONE_PRO]
+_RESTORE_PATH = [_act("Pro", action="click", selector="button[aria-label='Select ChatGPT model']"), _act("Pro", action="key", key="ArrowLeft"), _DONE_MED]
+
+
+def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text"):
+    kp = tmp_path / "keypress"
+    body = build_script(
+        "hi", space="subllm-chatgpt-abcd1234", timeout_ms=600000, keypress_file=str(kp), mode=mode,
+        **({"kind": "image", "image_dir": "/img/dir"} if kind == "image" else {}),
+    )
+    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "images": ["blob:a"] if kind == "image" else []}
+    runtime = _MODE_RUNTIME.replace("%CFG%", json.dumps(cfg))
+    prog = tmp_path / "run.js"
+    prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
+    p = subprocess.run(["node", str(prog)], capture_output=True, text=True, timeout=60)
+    log = json.loads(re.search(r"^ACT_LOG (.*)$", p.stdout, re.M).group(1))
+    return kp, log, parse_output(p.stdout)[1], p.stdout
+
+
+def _targets(log):
+    return [l for l in log if l.startswith("selectMode")]
+
+
+@needs_node
+def test_default_mode_never_touches_the_picker(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default")
+    assert not [l for l in log if l.startswith(("selectMode", "auditModel", "focus"))]
+    assert log.count("click div.ProseMirror[role=textbox]") + log.count("click #prompt-textarea") == 1
+    assert results[0]["ok"] is True
+
+
+def test_default_mode_script_args_carry_mode_default():
+    body = build_script("hi", space="s", timeout_ms=1, keypress_file="/k")
+    assert json.loads(re.search(r"const ARGS = (.*);\n", body).group(1))["mode"] == "default"
+
+
+@needs_node
+def test_pro_mode_selects_with_real_input_then_types(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, _PRO_PATH + _RESTORE_PATH)
+    first_type = log.index("type")
+    before = log[:first_type]
+    assert before.count("selectMode pro") == 8
+    assert [l for l in before if l.startswith(("click", "focus", "press"))][:7] == [
+        "click button[aria-label='Select ChatGPT model']",
+        "focus [role=menu] [data-reasoning-slider]",
+        "press ArrowRight", "press ArrowRight", "press ArrowRight", "press ArrowRight",
+        "press Escape",
+    ]
+    assert log[first_type - 1] in ("click div.ProseMirror[role=textbox]", "click #prompt-textarea")
+    assert results[0]["ok"] is True and kp.exists()
+
+
+@needs_node
+def test_picker_fail_step_is_client_without_keypress_record(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_act(None, action="fail", detail="picker is locked")])
+    assert not kp.exists() and "type" not in log
+    assert results[0]["kind"] == "client" and results[0]["detail"] == "mode selection failed: picker is locked"
+
+
+@needs_node
+def test_picker_step_bound_is_client_without_record_and_restore_is_bounded(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_RIGHT])
+    assert not kp.exists() and "type" not in log
+    assert results[0]["kind"] == "client" and results[0]["detail"] == "mode selection unconfirmed"
+    assert len(_targets(log)) == 32
+    assert _targets(log)[16:] == ["selectMode Medium"] * 16
+    assert log[-1] == "finish"
+
+
+@needs_node
+def test_post_selection_state_must_be_chat(tmp_path):
+    for bad, detail in (
+        ({**_CHAT, "mode_surface": "work"}, "Chat mode not confirmed after mode selection"),
+        ({**_CHAT, "busy": True}, "Chat mode not confirmed after mode selection"),
+        ({**_CHAT, "logged_in": False}, "Chat mode not confirmed after mode selection"),
+        ({**_CHAT, "quota": True}, "usage limit reached"),
+    ):
+        kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO, _DONE_MED], states=[_CHAT, bad])
+        assert not kp.exists() and "type" not in log
+        assert results[0]["detail"] == detail
+        assert results[0]["kind"] == ("quota" if bad["quota"] else "client")
+
+
+@needs_node
+def test_downgrade_audit_carries_text_served_model_and_requested_mode(tmp_path):
+    kp, log, results, _ = _run_mode(
+        tmp_path, [_DONE_PRO, _DONE_MED], audit="downgrade", served="GPT-6 Thinking"
+    )
+    r = results[0]
+    assert r["ok"] is False and r["kind"] == "downgrade"
+    assert r["detail"] == "requested pro, served GPT-6 Thinking"
+    assert (r["text"], r["served_model"], r["requested_mode"]) == ("cap", "GPT-6 Thinking", "pro")
+    assert kp.exists()
+
+
+@needs_node
+def test_downgrade_audit_runs_before_the_image_fetch(tmp_path):
+    kp, log, results, _ = _run_mode(
+        tmp_path, [_DONE_PRO, _DONE_MED], audit="downgrade", served="x", kind="image"
+    )
+    assert results[0]["kind"] == "downgrade" and not [l for l in log if l.startswith("fetch")]
+
+
+@needs_node
+def test_image_with_a_good_audit_still_fetches(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], kind="image")
+    assert results[0]["ok"] is True and "fetch blob:a" in log
+
+
+@needs_node
+def test_restore_runs_after_success_when_the_level_changed(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO] + _RESTORE_PATH)
+    assert results[0]["ok"] is True
+    assert _targets(log) == ["selectMode pro"] * 2 + ["selectMode Medium"] * 3
+    assert log[-1] == "finish" and log.index("press Enter") < log.index("selectMode Medium")
+
+
+@needs_node
+def test_restore_is_skipped_when_the_level_is_unchanged(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_act("Pro", action="done", selected_label="Pro")])
+    assert results[0]["ok"] is True
+    assert _targets(log) == ["selectMode pro"]
+
+
+@needs_node
+def test_restore_runs_after_a_post_send_failure(tmp_path):
+    kp, log, results, _ = _run_mode(
+        tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO] + _RESTORE_PATH,
+        audit="downgrade", served="m",
+    )
+    assert results[0]["kind"] == "downgrade"
+    assert _targets(log).count("selectMode Medium") == 3
+
+
+@needs_node
+def test_throwing_restore_does_not_change_the_result(tmp_path):
+    kp, log, results, out = _run_mode(
+        tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO, {"throw": "RESTORE_BOOM"}]
+    )
+    assert results[0]["ok"] is True
+    assert "picker restore failed: RESTORE_BOOM" in out
+    assert log[-1] == "finish"
+
+
+def test_downgrade_result_maps_to_model_downgrade_error(ego):
+    ego(
+        res(ok=False, kind="downgrade", detail="requested pro, served m", conversation_url=URL, text="ans",
+            served_model="m", requested_mode="pro"),
+        keypress=True, code=1,
+    )
+    with pytest.raises(ModelDowngradeError) as ei:
+        EgoDriver().run_text("hi", timeout_s=5, mode="pro")
+    e = ei.value
+    assert (e.text, e.served_model, e.requested_mode) == ("ans", "m", "pro")
+    assert '"mode": "pro"' in (ego.dir / "script.js").read_text()
