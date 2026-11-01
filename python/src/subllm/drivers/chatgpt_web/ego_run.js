@@ -30,7 +30,12 @@ try {
   const isChat = async () => /\/c\//.test(new URL(await page.url()).pathname);
 
   await page.cdp("Page.bringToFront");
-  await page.goto("https://chatgpt.com/");
+  // chatgpt.com can stay "interactive" past goto's load wait; the state loop below is the real wait.
+  try {
+    await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded" });
+  } catch (e) {
+    if (!/navigation committed/.test(String((e && e.message) || e))) throw e;
+  }
 
   let st = null;
   const waitEnd = Date.now() + 45000;

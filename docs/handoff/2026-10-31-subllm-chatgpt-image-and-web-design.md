@@ -184,3 +184,7 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 **Touches**
 - New: python/src/subllm/chatgpt_web.py, tests/test_chatgpt_web_llm.py, tests/test_cli_chatgpt_web.py.
 - Changed: base.py (WebTextResult), __init__.py exports, cli.py (shared surface: `--effort` default, `--client`, `--browser`), ego.py, ego_run.js, test_chatgpt_web_ego.py, test_integration.py, README.md, AGENTS.md, docs/drivers-contract.md.
+
+### T3 live-run fixes
+
+- Live call 1 failed before the send (no quota): `page.goto` waits for `load` (15 s) and chatgpt.com stayed `interactive`. The script now uses `waitUntil: "domcontentloaded"` (probe: returns in ~9 s) and ignores a goto timeout whose message says the navigation committed; the 45 s state loop is the real wait. Any other goto error stays a pre-send `client` failure. Node-harness tests for both; 3/3 mutants caught.

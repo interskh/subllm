@@ -373,3 +373,34 @@ def test_early_send_during_typing_writes_record_and_reports_chat_opened(tmp_path
     assert len(results) == 1
     assert results[0]["ok"] is False and results[0]["kind"] == "client"
     assert "chat opened before the send key" in results[0]["detail"]
+
+
+def _run_fake(tmp_path, goto_js):
+    kp = tmp_path / "keypress"
+    body = build_script("hi", space="subllm-chatgpt-abcd1234", timeout_ms=1000, keypress_file=str(kp))
+    runtime = _FAKE_RUNTIME.replace("  goto: async () => {},", goto_js)
+    prog = tmp_path / "run.js"
+    prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
+    p = subprocess.run(["node", str(prog)], capture_output=True, text=True, timeout=60)
+    return kp, p.stdout, parse_output(p.stdout)[1]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_goto_load_timeout_after_commit_continues_to_state_loop(tmp_path):
+    goto = (
+        "  goto: async (u, o) => { console.log('GOTO_OPTS ' + JSON.stringify(o));"
+        " throw new Error('page.goto timed out after 15000ms waiting for load;"
+        ' navigation committed at "https://chatgpt.com/"\'); },'
+    )
+    kp, out, results = _run_fake(tmp_path, goto)
+    assert 'GOTO_OPTS {"waitUntil":"domcontentloaded"}' in out
+    assert len(results) == 1 and "chat opened before the send key" in results[0]["detail"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_goto_failure_before_commit_is_client_without_record(tmp_path):
+    goto = "  goto: async () => { throw new Error('EGO_PAGE_UNRESPONSIVE'); },"
+    kp, out, results = _run_fake(tmp_path, goto)
+    assert not kp.exists()
+    assert len(results) == 1 and results[0]["kind"] == "client"
+    assert "EGO_PAGE_UNRESPONSIVE" in results[0]["detail"]
