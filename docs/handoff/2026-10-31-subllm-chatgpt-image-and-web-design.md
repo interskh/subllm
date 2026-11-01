@@ -398,3 +398,12 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 
 **Touches**: chrome.py, conftest.py, test_chatgpt_web_chrome.py, test_chatgpt_web_llm.py, README.md, docs/drivers-contract.md. Mutants: 8/8 caught (timer not armed, wrong pid, no signal, expired dropped, ~/Applications accepted, reason without extra, challenge text, profile message always).
 - Cycle 2: the timer callback runs its kill under a `threading.Lock` gate and the finish path takes the same gate (setting `finished`) before closing Chrome, so a callback can neither outlive the call nor kill a later call's browser; one test + one mutant (finish without the gate) caught.
+
+### Slice 4 gate
+- Owner decision (2026-11-01): offline verification only; the spec's "live text + image on Chrome" and the Chrome login prerequisite are waived, not blocked. The live Chrome path to chatgpt.com is unverified; README and drivers-contract say so.
+- Whole-run reviewer: BLOCK (no overall time limit on a Chrome call, so a frozen renderer held the lock forever) -> fixed in 14db8d5 -> PASS; d96d7eb re-check PASS. Codex: 2 MAJOR (same time limit; detection accepted Chrome paths that `channel="chrome"` never launches) + 1 MINOR (Chrome-missing reason lacked `subllm[chrome]`), all fixed in 14db8d5; its re-check found 1 MAJOR in the fix (a late watchdog callback could kill the next call's browser), fixed in d96d7eb, re-check FIXED with no new defects. Two of two fix cycles used.
+- Full hermetic suite at d96d7eb (tripwire stubs for codex/claude/ego-browser first on PATH, no SUBLLM_* env): 585 passed, 77 skipped; tripwire log empty for every run in this slice. Browser fixture tests (SUBLLM_BROWSER=1, real ego lite + headless Google Chrome via patchright, throwaway profile, all network aborted): 64 passed at dd5498d (ego 31, chrome 33); chrome substrate re-run at 14db8d5: 33 passed.
+- Privacy scan 5928fcb..HEAD: clean (author-identity warning only).
+- Deferred: the Chrome launch itself is not under the watchdog; the login helper ends when its first tab closes; any flock OSError is treated as "lock held" (now both drivers); the SingletonLock pid format and the kill are unverified against a running Chrome; Windows has no SingletonLock, so the watchdog kill is a no-op there; live Chrome text and image turns, main-world captureText and the blob: fetch on the real chatgpt.com page are unverified. Earlier slices' deferred items remain open.
+
+implement-loop: slice 4 shipped d96d7eb; remaining: [5]
