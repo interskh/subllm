@@ -120,3 +120,39 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 - New live fixtures: `redesign-streaming-text.html` (rendered Stop, no Copy) and `redesign-completed-markdown.html`, both trimmed to the `thread-scroll-container` subtree (the raw capture root climbed to the sidebar; the sidebar was cut before sanitizing). `synthetic-streaming.html` stays for the user-"Copy message" test.
 - `sanitize.py` (committed): allowlist text sanitizer for captures; drops `data-*name*/email` values (the home greeting carried the account name in `data-headline-name`).
 - Pre-send tab handling: `Page.bringToFront` before `goto` (one goto without it never rendered the composer).
+
+### T2 — errors and EgoDriver
+
+**Decisions**
+- `HumanActionRequired`, `SendUnconfirmedError`, `ModelDowngradeError` subclass `SubllmError` directly; exported from `subllm`.
+- Protocol extensions to spec §4.3: a `rejected` event (before the client result when acceptance reads rejected); `format` and `conversation_url` on the ok line.
+- Subprocess timeout = `timeout_s + 90 + int(len(prompt) * 0.06)`; the script deadline = `timeout_s` from script start (so the script normally reports first).
+- Lock: `~/.local/share/subllm/chatgpt-web.lock` (flock, polled to `timeout_s`), held for the whole run, fd closed in `finally`.
+- Keypress record: `mkdtemp(prefix="subllm-chatgpt-")/keypress`, written by the script before `SUBLLM_EVENT keypress`; dir removed in `finally`.
+- `available()` caches only a passing detection; `check_guide()` is part of the ladder and callable on its own.
+- Post-keypress `client` without a `rejected` event maps to SendUnconfirmedError (acceptance pending = unknown), only rejected+client is a plain ClientError.
+- `downgrade` kind is mapped (requested_mode None) but the script never emits it yet (slice 5).
+
+**Rejected**
+- A mkdir in the script for the keypress dir: mkdtemp already creates it; fewer moving parts.
+- Trusting ok:true on a non-zero exit: could be a half-dead runtime; SendUnconfirmedError per the brief.
+
+**Assumptions**
+- The ego runtime can write under the system temp dir (`node:fs`); unverified live. If not, the script fails before any keypress (safe), check on the first live run.
+- `task.handOff()` exists in guide v2.2.0 (from the brief); the browser tests do not cover it. Check live.
+- `ego-browser skill` prints `usage guide vX.Y.Z` (given in the brief).
+
+**Deferred**
+- `browser` resolution and WebTextResult wrapping (T3); downgrade detection (slice 5); images (slice 3). The generated script was only `node --check`ed, never run.
+
+**Touches**
+- New: `errors.py` additions, `__init__.py` exports, `drivers/chatgpt_web/{ego.py,ego_run.js}`, `tests/test_chatgpt_web_ego.py`. No page_core.js change.
+- Mutation battery on ego.py mapping: 8/8 caught.
+
+**Review fixes (T2)**
+- Prompt normalized in `run_text` before the script is built: CRLF and lone CR become LF, tab becomes four spaces (keyboard.type presses Enter on CR and moves focus on Tab). Length-based budget uses the normalized prompt.
+- "chat opened before the send key" branch now writes the keypress record first, so Python raises SendUnconfirmedError.
+- Answer deadline starts right after the Enter press; page wait (45 s) and typing have their own bounds. Subprocess budget is now `timeout_s + 120 + int(len(prompt) * 0.06)`.
+- `available()` is the ladder only (which, --version, health); a guide mismatch is only raised by `check_guide()` (spec D-4, never a fallback).
+- Legacy composer: the script checks for the ProseMirror editor and clicks `#prompt-textarea` otherwise (untested live).
+- Lock open, lock dir creation and template/core reads turn OSError into ClientError before anything is sent.
