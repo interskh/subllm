@@ -525,3 +525,7 @@ implement-loop: slice 4 shipped d96d7eb; remaining: [5]
 - Ego `human_action` after a changed picker level skips restore (existing behavior; the user takes over the page).
 
 **Touches**: `drivers/chatgpt_web/{ego_run.js,chrome.py}`, tests `test_chatgpt_web_{ego,chrome}.py`, README, drivers-contract. page_core unchanged. Mutants 7/7 caught.
+
+### Slice 5 gate fixes (cycle 2)
+
+- `runPicker` now re-checks `pickerAbort` right after the `selectMode` await, before any click/focus/key, so a planner call that returns after the 15 s bound does no input (cycle 1 only checked at loop top). Test `test_restore_waking_after_the_bound_does_no_input`; the ego harness fake timer logs `bound`. Mutant (check removed) caught; tests/ego_run.js only.

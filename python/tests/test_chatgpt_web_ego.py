@@ -837,7 +837,7 @@ const __st = { i: 0 };
 const __typed = { done: false };
 const __next = (list, ix) => { const v = list[Math.min(ix.i, list.length - 1)]; ix.i += 1; return v; };
 let __t = Date.now(); Date.now = () => (__t += 1000);
-const __timer = setTimeout; globalThis.setTimeout = (f, ms) => __timer(f, ms >= 10000 ? 300 : 0);
+const __timer = setTimeout; globalThis.setTimeout = (f, ms) => __timer(ms >= 10000 ? () => { __log.push("bound"); f(); } : f, ms >= 10000 ? 300 : 0);
 process.on('exit', () => console.log('ACT_LOG ' + JSON.stringify(__log)));
 const __page = {
   url: async () => (__typed.done ? "https://chatgpt.com/c/fake-id" : "https://chatgpt.com/"),
@@ -865,6 +865,7 @@ const __page = {
       const v = __next(__cfg.picks, __pick);
       if (v.throw) throw new Error(v.throw);
       if (v.hang) return new Promise(() => {});
+      if (v.late) return new Promise((r) => __timer(() => r(v), 900));
       return v;
     }
     if (call.includes(").auditModel(")) { __log.push("auditModel"); return __cfg.audit; }
@@ -1029,6 +1030,18 @@ def test_restore_runs_after_a_post_send_failure(tmp_path):
     )
     assert results[0]["kind"] == "downgrade"
     assert _targets(log).count("selectMode Medium") == 3
+
+
+@needs_node
+def test_restore_waking_after_the_bound_does_no_input(tmp_path):
+    late = _act("Pro", action="key", key="ArrowLeft", late=True)
+    kp, log, results, out = _run_mode(tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO, late])
+    assert results[0]["ok"] is True
+    assert "picker restore failed: picker restore timed out" in out
+    b = log.index("bound")
+    assert _targets(log)[-1] == "selectMode Medium"
+    assert not [l for l in log[b:] if l.startswith(("press", "click", "focus"))]
+    assert log[-1] == "finish"
 
 
 @needs_node

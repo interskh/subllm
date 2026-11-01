@@ -35,6 +35,7 @@ const runPicker = async (target, track) => {
   for (let i = 0; i < 16; i++) {
     if (pickerAbort) return { ok: false, first, detail: "restore timed out" };
     const s = await core("selectMode", target);
+    if (pickerAbort) return { ok: false, first, detail: "restore timed out" };
     if (first === null) {
       first = s.current;
       // Recorded before any action so a throw mid-loop still restores the level.
