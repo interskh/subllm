@@ -150,6 +150,19 @@
     return out;
   };
 
+  const USER_SEL = "[data-content-search-unit-key$=':user'], [data-message-author-role=user], [data-conversation-role=user], [data-user-message-bubble]";
+  const turnImages = (turn, scope) => {
+    const roots = turn ? [turn] : [];
+    if (scope && !(turn && turn.contains(scope))) roots.push(scope);
+    const out = [];
+    for (const root of roots) {
+      for (const i of q(root, "img")) {
+        if (rendered(i) && i.complete && i.naturalWidth > 128 && !i.closest(USER_SEL) && !out.includes(i.src)) out.push(i.src);
+      }
+    }
+    return out;
+  };
+
   const turnStatus = (turn_key, prev_text) => {
     const turn = findTurn(turn_key);
     const scope = assistantScope(turn);
@@ -168,7 +181,7 @@
       text_stable,
       stop_visible,
       copy_visible,
-      images: scope ? q(scope, "img").filter(rendered).map((i) => i.src) : [],
+      images: turnImages(turn, scope),
       error_dialog,
     };
   };

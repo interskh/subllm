@@ -1,9 +1,11 @@
 """ChatGPTWebLLM — the chatgpt.com web app in a real logged-in browser."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from subllm.base import BaseLLM, WebTextResult
+from subllm._images import prepare_out_dir
+from subllm.base import BaseLLM, ImageGenerator, ImageResult, WebTextResult
 from subllm.codex import _JSON_INSTRUCTION, _parse_json_object
 from subllm.drivers.chatgpt_web.ego import EgoDriver, normalize_prompt
 from subllm.errors import ClientError, OutputError
@@ -12,9 +14,10 @@ from subllm.preflight import RegionGuard
 _PLANS = ("free", "plus", "pro")
 _BROWSERS = ("auto", "ego", "chrome")
 _DEFAULT_TIMEOUT_S = 600.0
+_IMAGE_INSTRUCTION = "Generate an image: "
 
 
-class ChatGPTWebLLM(BaseLLM):
+class ChatGPTWebLLM(BaseLLM, ImageGenerator):
     def __init__(
         self,
         mode: str = "default",
@@ -65,6 +68,16 @@ class ChatGPTWebLLM(BaseLLM):
         if not result.text.strip():
             raise OutputError("chatgpt.com returned an empty answer")
         return result
+
+    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult:
+        if self._guard is not None:
+            self._guard.check()  # RegionError before any browser subprocess
+        if not normalize_prompt(prompt).strip():
+            raise ClientError("the prompt is empty")
+        dest = prepare_out_dir(out_dir)
+        driver = self._resolve_driver()
+        driver.check_guide()
+        return driver.run_image(_IMAGE_INSTRUCTION + prompt, dest, timeout_s=self._timeout_s)
 
     def complete(self, prompt: str) -> str:
         return self.complete_result(prompt).text

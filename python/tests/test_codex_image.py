@@ -173,8 +173,8 @@ def test_existing_files_untouched_and_out_dir_created(env, tmp_path):
 
 def test_exclusive_create_never_overwrites(env, monkeypatch):
     _, out, _ = env
-    monkeypatch.setattr("subllm.codex.secrets.token_hex", lambda n: "deadbeef")
-    monkeypatch.setattr("subllm.codex.datetime", type("D", (), {
+    monkeypatch.setattr("subllm._images.secrets.token_hex", lambda n: "deadbeef")
+    monkeypatch.setattr("subllm._images.datetime", type("D", (), {
         "now": staticmethod(lambda tz=None: __import__("datetime").datetime(2026, 1, 2, 3, 4, 5))
     }))
     out.mkdir()

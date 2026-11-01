@@ -2,14 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
-import secrets
-import shutil
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from subllm._images import prepare_out_dir, save_numbered
 from subllm.base import BaseLLM, ImageGenerator, ImageResult, _retry, _validate_with_model
 from subllm.drivers.codex_exec import run_codex_exec
 from subllm.drivers.codex_web import run_codex_web_task
@@ -91,27 +88,13 @@ class CodexLLM(BaseLLM, ImageGenerator):
         re-spend ~46 s and Codex quota per attempt; the caller decides."""
         if self._guard is not None:
             self._guard.check()  # RegionError before any subprocess
-        try:
-            dest = Path(out_dir).expanduser().resolve()
-            dest.mkdir(parents=True, exist_ok=True)
-            if not (dest.is_dir() and os.access(dest, os.W_OK | os.X_OK)):
-                raise NotADirectoryError(f"not a writable directory: {dest}")
-        except (OSError, RuntimeError) as e:
-            raise ClientError(f"cannot use out_dir {out_dir}: {e}") from e
+        dest = prepare_out_dir(out_dir)
         saved: list[Path] = []
 
         def _collect(files: list[Path]) -> None:
             if not files:
                 raise OutputError("codex produced no image (the agent did not call the image tool)")
-            stem = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{secrets.token_hex(4)}"
-            for n, src in enumerate(files, 1):
-                target = dest / f"{stem}-{n}{src.suffix.lower()}"
-                try:
-                    with open(src, "rb") as fin, open(target, "xb") as fout:
-                        shutil.copyfileobj(fin, fout)
-                except OSError as e:
-                    raise ClientError(f"cannot write image {target}: {e}") from e
-                saved.append(target)
+            saved.extend(save_numbered([(f, f.suffix.lower()) for f in files], dest))
 
         text = run_codex_exec(
             _IMAGE_INSTRUCTION + prompt,

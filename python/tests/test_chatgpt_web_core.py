@@ -79,6 +79,8 @@ SHOW_STOP = (
     "(() => { document.querySelector('button[aria-label=\"Stop\"]').removeAttribute('hidden'); return true; })()"
 )
 
+DECODE_IMAGES = "(async () => { await Promise.all(Array.from(document.images).map(i => i.decode())); return true; })()"
+
 GROUPS = [
     ("redesign-idle-chat.html", [
         ("idle_state", call("state")),
@@ -150,6 +152,10 @@ GROUPS = [
     ]),
     ("synthetic-completed-error-words.html", [
         ("error_words_probe", SETTLED % (json.dumps(KEY), json.dumps(KEY))),
+    ]),
+    ("synthetic-completed-image.html", [
+        ("pre_decode", DECODE_IMAGES),
+        ("image_probe", call("turnStatus", KEY, None)),
     ]),
     ("synthetic-legacy-error-alert.html", [
         ("legacy_alert_probe", SETTLED % (json.dumps(None), json.dumps(None))),
@@ -390,3 +396,11 @@ def test_prompt_and_answer_starting_with_unknown_error_are_not_an_error_dialog(r
 def test_legacy_error_alert_beside_the_answer_body_is_an_error_dialog(r):
     p = r["legacy_alert_probe"]
     assert p["error_dialog"] and p["error_dialog"]["text"].startswith("Something went wrong while")
+
+
+def test_image_probe_excludes_icon_and_user_image(r):
+    html = (FIXTURES / "synthetic-completed-image.html").read_text()
+    user_img, icon, big = re.findall(r'<img[^>]*? src="([^"]+)"', html)
+    assert len({user_img, icon, big}) == 3
+    assert r["image_probe"]["images"] == [big]
+    assert "PINEAPPLE" in r["image_probe"]["text"]

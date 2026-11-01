@@ -222,3 +222,34 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 - Deferred: flock OSError other than EWOULDBLOCK; `WebTextResult.conversation_url` typed str while `_map` can pass None; `finish()` after an error (guide advises against, spec D-4 keeps it); legacy answer without `.markdown` starting with an error phrase while the URL is a placeholder (reviewer: not a real scenario); the real chatgpt.com error placement is unverified live (a misplacement fails safe as SendUnconfirmedError).
 
 implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
+
+## Slice 3 — Web-route image on ego lite
+
+### T1 — web-route image generation (driver + client)
+
+**Decisions**
+- One `ego_run.js` template, `ARGS.kind`/`ARGS.image_dir`; `build_script` defaults to text so old callers are unchanged.
+- Image done = no Stop, images non-empty, equal to the previous read. Refusal grace 8 s counted from the first `ts.done && zero images` read, reset on any other read.
+- `turnStatus.images` searches the whole turn plus the legacy assistant scope when it lies outside the turn; user units excluded via `closest`; `naturalWidth > 128`.
+- `ego.py`: `_run`/`_run_locked` shared; `_map` now returns the ok payload dict (+ url); `run_text` builds `WebTextResult`. Image post-processing runs inside the `try` before `rmtree`. Validate all files before copying any (a bad second file saves nothing).
+- Containment = not a symlink, regular file, `parent.resolve() == tmpdir.resolve()`; format from magic bytes, never from the listed name.
+- `subllm/_images.py` (`prepare_out_dir`, `save_numbered`) shared with codex; codex behaviour identical.
+- `ChatGPTWebLLM.generate_image`: guard -> empty prompt -> `prepare_out_dir` -> driver -> guide -> one attempt.
+- Image subprocess budget +60 s.
+
+**Rejected**
+- Keeping `secrets`/`datetime` imports in codex.py just so the old test patch targets work: dead imports. Instead the two monkeypatch targets in `test_codex_image.py::test_exclusive_create_never_overwrites` moved to `subllm._images.*` (assertions unchanged).
+- Requiring the Copy button for images: live fact says it is absent.
+- Retrying image generation: duplicate quota spend.
+
+**Assumptions**
+- `page.fetch(blob:..., {saveAs})` works in the generated script as in the live probe; only a fake runtime covers it here (a live check belongs to T2/integration).
+- An image-only turn has empty text; `captureText` fallback returns "" and that is allowed.
+
+**Deferred**
+- Live e2e, CLI flag, docs, integration test: T2.
+
+**Touches**
+- New: `python/src/subllm/_images.py`, `tests/fixtures/chatgpt_web/synthetic-completed-image.html`.
+- Edited: `chatgpt_web.py`, `codex.py` (refactor only), `drivers/chatgpt_web/{ego.py,ego_run.js,page_core.js}`, tests `test_chatgpt_web_{core,ego,llm}.py`, `test_codex_image.py` (2 patch targets).
+- Shared surface: `_map` return type (dict), `build_script` signature (new kwargs).

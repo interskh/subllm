@@ -1,11 +1,13 @@
+import json
 import os
 
 import pytest
 
 from subllm import ChatGPTWebLLM, RegionGuard, WebTextResult
+from subllm.base import ImageGenerator, ImageResult
 from subllm.errors import ClientError, OutputError, QuotaError, RegionError
 
-from .test_chatgpt_web_ego import OK, STUB, URL, ev, fail, res
+from .test_chatgpt_web_ego import IMG_STUB, OK, PNG_BYTES, STUB, URL, ev, fail, img_ok, res
 
 # Records every ego-browser call (detection included) before the shared stub runs.
 RECORDING_STUB = STUB.replace(
@@ -139,3 +141,75 @@ def test_empty_prompt_is_client_error_before_any_ego_call(ego):
     with pytest.raises(ClientError, match="empty"):
         ChatGPTWebLLM().complete("  \n\t ")
     assert not (ego.dir / "calls").exists()
+
+
+@pytest.fixture
+def egoimg(fake_bin, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    d = tmp_path / "stub"
+    d.mkdir()
+    (d / "png.bin").write_bytes(PNG_BYTES)
+    monkeypatch.setenv("STUB_DIR", str(d))
+    fake_bin("ego-browser", IMG_STUB.replace("case \"$1\" in", 'echo "$@" >> "$STUB_DIR/calls"\ncase "$1" in', 1))
+    monkeypatch.setenv("STUB_STDERR", "")
+    monkeypatch.setenv("STUB_KEYPRESS", "1")
+    monkeypatch.setenv("STUB_CODE", "0")
+    monkeypatch.setenv("STUB_IMG_CMD", 'cp "$STUB_DIR/png.bin" "$idir/img-1"')
+    monkeypatch.setenv("STUB_STDOUT", ev(phase="accepted", conversation_url=URL) + "\n" + img_ok("img-1"))
+    d_out = tmp_path / "out"
+    return d, d_out
+
+
+def test_generate_image(egoimg):
+    d, out = egoimg
+    r = ChatGPTWebLLM().generate_image("a red cube", out)
+    assert isinstance(r, ImageResult)
+    assert r.route == "web" and r.conversation_url == URL and r.text == "here"
+    assert [p.parent for p in r.paths] == [out.resolve()] and r.paths[0].read_bytes() == PNG_BYTES
+
+
+def test_generate_image_prompt_carries_instruction(egoimg):
+    d, out = egoimg
+    ChatGPTWebLLM().generate_image("a red cube", out)
+    line = next(l for l in (d / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    args = json.loads(line[len("const ARGS = "):].rstrip(";"))
+    assert args["prompt"] == "Generate an image: a red cube" and args["kind"] == "image"
+
+
+def test_generate_image_unusable_out_dir_never_runs_the_browser(egoimg, tmp_path):
+    d, _ = egoimg
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    for bad in (blocker, blocker / "sub"):
+        with pytest.raises(ClientError, match="out_dir") as ei:
+            ChatGPTWebLLM().generate_image("x", bad)
+        assert type(ei.value) is ClientError
+    assert not (d / "ran").exists() and not (d / "calls").exists()
+
+
+def test_generate_image_region_guard_first(egoimg):
+    d, out = egoimg
+    guard = RegionGuard(allowed_regions={"US"}, lookup=lambda: "XX")
+    with pytest.raises(RegionError):
+        ChatGPTWebLLM(region_guard=guard).generate_image("x", out)
+    assert not (d / "calls").exists() and not out.exists()
+
+
+def test_generate_image_empty_prompt_before_any_subprocess(egoimg):
+    d, out = egoimg
+    with pytest.raises(ClientError, match="empty"):
+        ChatGPTWebLLM().generate_image(" \n\t ", out)
+    assert not (d / "calls").exists() and not out.exists()
+
+
+def test_generate_image_is_one_attempt(egoimg, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", ev(phase="accepted", conversation_url=URL) + "\n" + fail("output", "no image in the answer", url=URL))
+    monkeypatch.setenv("STUB_CODE", "1")
+    with pytest.raises(OutputError):
+        ChatGPTWebLLM().generate_image("x", out)
+    assert (d / "calls").read_text().count("nodejs") == 2  # health check + one run
+
+
+def test_is_image_generator():
+    assert isinstance(ChatGPTWebLLM(), ImageGenerator)

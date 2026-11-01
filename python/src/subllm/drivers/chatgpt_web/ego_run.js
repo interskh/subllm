@@ -96,7 +96,10 @@ try {
   conversationUrl = acc.conversation_url;
   event({ phase: "accepted", conversation_url: conversationUrl });
 
+  const image = ARGS.kind === "image";
   let prev = null;
+  let prevImages = null;
+  let noImageSince = null;
   let ts = null;
   for (;;) {
     ts = await core("turnStatus", acc.turn_key, prev);
@@ -104,21 +107,41 @@ try {
       const e = ts.error_dialog;
       stop(e.kind === "quota" ? "quota" : "client", e.text || "error dialog");
     }
-    if (ts.done) break;
+    if (image) {
+      if (!ts.stop_visible && ts.images.length > 0 && JSON.stringify(ts.images) === JSON.stringify(prevImages)) break;
+      if (ts.done && ts.images.length === 0) {
+        if (noImageSince === null) noImageSince = Date.now();
+        if (Date.now() - noImageSince >= 8000) stop("output", "no image in the answer");
+      } else {
+        noImageSince = null;
+      }
+      prevImages = ts.images;
+    } else if (ts.done) {
+      break;
+    }
     if (Date.now() >= answerDeadline) stop("client", "timed out waiting for the answer");
     prev = ts.text;
     await sleep(700);
   }
 
   const cap = await core("captureText", acc.turn_key);
-  if (!cap || !String(cap.text || "").trim()) stop("output", "empty answer");
+  if (!image && (!cap || !String(cap.text || "").trim())) stop("output", "empty answer");
   const served = await core("servedModel", acc.turn_key);
+  const images = [];
+  if (image) {
+    for (const [i, src] of ts.images.entries()) {
+      const path = ARGS.image_dir + "/img-" + (i + 1);
+      const r = await page.fetch(src, { saveAs: path, timeout: 30000 });
+      if (!r || !r.ok) stop("client", "image fetch failed: " + ((r && (r.status || r.statusText)) || "no response"));
+      images.push(path);
+    }
+  }
   outcome = "ok";
   result({
     ok: true,
-    text: cap.text,
-    format: cap.format === "markdown" ? "markdown" : "plain",
-    images: [],
+    text: (cap && cap.text) || "",
+    format: cap && cap.format === "markdown" ? "markdown" : "plain",
+    images,
     served_model: served,
     conversation_url: conversationUrl,
   });

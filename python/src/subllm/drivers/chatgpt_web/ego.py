@@ -15,7 +15,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from subllm.base import WebTextResult
+from subllm._images import save_numbered
+from subllm.base import ImageResult, WebTextResult
 from subllm.errors import (
     ClientError,
     HumanActionRequired,
@@ -40,8 +41,27 @@ def normalize_prompt(prompt: str) -> str:
     return prompt.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
 
 
-def build_script(prompt: str, *, space: str, timeout_ms: int, keypress_file: str) -> str:
-    args = {"prompt": prompt, "space": space, "timeout_ms": timeout_ms, "keypress_file": keypress_file}
+_MAGIC = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"))
+
+
+def _sniff(head: bytes) -> str | None:
+    for magic, ext in _MAGIC:
+        if head.startswith(magic):
+            return ext
+    return ".webp" if head[:4] == b"RIFF" and head[8:12] == b"WEBP" else None
+
+
+def build_script(
+    prompt: str, *, space: str, timeout_ms: int, keypress_file: str, kind: str = "text", image_dir: str | None = None
+) -> str:
+    args = {
+        "prompt": prompt,
+        "space": space,
+        "timeout_ms": timeout_ms,
+        "keypress_file": keypress_file,
+        "kind": kind,
+        "image_dir": image_dir,
+    }
     try:
         core = (_HERE / "page_core.js").read_text()
         template = (_HERE / "ego_run.js").read_text()
@@ -121,6 +141,18 @@ class EgoDriver:
         self._guide_ok = True
 
     def run_text(self, prompt: str, *, timeout_s: float) -> WebTextResult:
+        res = self._run(prompt, timeout_s, "text", None)
+        return WebTextResult(
+            text=res.get("text") or "",
+            format=res.get("format") or "plain",
+            served_model=res.get("served_model"),
+            conversation_url=res["conversation_url"],
+        )
+
+    def run_image(self, prompt: str, dest: Path, *, timeout_s: float) -> ImageResult:
+        return self._run(prompt, timeout_s, "image", dest)
+
+    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
@@ -142,11 +174,11 @@ class EgoDriver:
                     if time.monotonic() >= end:
                         raise ClientError(f"another chatgpt-web call holds {path}") from None
                     time.sleep(min(0.25, max(0.01, end - time.monotonic())))
-            return self._run_locked(prompt, timeout_s)
+            return self._run_locked(prompt, timeout_s, kind, dest)
         finally:
             fd.close()
 
-    def _run_locked(self, prompt: str, timeout_s: float) -> WebTextResult:
+    def _run_locked(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
         tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
         keypress = tmpdir / "keypress"
         try:
@@ -155,8 +187,10 @@ class EgoDriver:
                 space=f"subllm-chatgpt-{secrets.token_hex(4)}",
                 timeout_ms=int(timeout_s * 1000),
                 keypress_file=str(keypress),
+                kind=kind,
+                image_dir=str(tmpdir),
             )
-            budget = timeout_s + 120 + int(len(prompt) * 0.06)
+            budget = timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
             out = err = ""
             code: int | None = None
             expired: str | None = None
@@ -172,9 +206,40 @@ class EgoDriver:
                 out = _txt(e.stdout)
                 err = _txt(e.stderr)
             sent = keypress.exists()
+            res = _map(out, err, code, sent, expired)
+            return res if kind == "text" else _collect_images(res, tmpdir, dest)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-        return _map(out, err, code, sent, expired)
+
+
+def _collect_images(res: dict, tmpdir: Path, dest: Path) -> ImageResult:
+    url = res["conversation_url"]
+    listed = res.get("images")
+    if not isinstance(listed, list) or not listed:
+        raise SendUnconfirmedError("chatgpt.com reported success but listed no image", conversation_url=url)
+    root = tmpdir.resolve()
+    files: list[tuple[Path, str]] = []
+    for item in listed:
+        p = Path(item) if isinstance(item, str) else None
+        ext = None
+        if p is not None and not p.is_symlink() and p.is_file() and p.parent.resolve() == root:
+            try:
+                with open(p, "rb") as f:
+                    ext = _sniff(f.read(12))
+            except OSError:
+                pass
+        if ext is None:
+            raise SendUnconfirmedError(
+                "chatgpt.com reported an image that is missing or not a PNG/WebP/JPEG file", conversation_url=url
+            )
+        files.append((p, ext))
+    return ImageResult(
+        paths=save_numbered(files, dest),
+        route="web",
+        text=res.get("text") or "",
+        conversation_url=url,
+        served_model=res.get("served_model"),
+    )
 
 
 def _txt(v) -> str:
@@ -183,7 +248,7 @@ def _txt(v) -> str:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
-def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) -> WebTextResult:
+def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) -> dict:
     events, results = parse_output(out + "\n" + err)
     res = results[0] if len(results) == 1 else None
     url = None
@@ -216,12 +281,7 @@ def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) 
         )
     if res.get("ok"):
         if code == 0:
-            return WebTextResult(
-                text=res.get("text") or "",
-                format=res.get("format") or "plain",
-                served_model=res.get("served_model"),
-                conversation_url=url,
-            )
+            return {**res, "conversation_url": url}
         raise SendUnconfirmedError(
             f"ego-browser exited {code} after reporting success", conversation_url=url
         )
