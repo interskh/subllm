@@ -662,7 +662,23 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   exclusive create. A missing, empty-list, outside or non-image file, or a failed copy into `out_dir`, after an ok
   result is a `SendUnconfirmedError` with the conversation URL.
 - IMAGE BUDGET. The subprocess budget is `timeout_s + 120 + 0.06 * len(prompt)`
-  seconds, plus 60 s for image runs. Image runs are never retried.
+  seconds, plus 60 s for image runs, plus the reference attach bound (below).
+  Image runs are never retried.
+- REFERENCE IMAGES. `run_image(..., references=[abs paths])` (both substrates;
+  empty = no change; a relative path is a `ClientError`; the files themselves are
+  validated by the caller). After the Chat/mode checks and before the composer is
+  focused, the driver (1) requires `attachments().count == 0` (a draft already
+  holding attachments is refused), (2) asks `referenceInput(n)` for the composer
+  form's hidden `input[type=file]` (accept lists `image/*`, no `capture`, `multiple`
+  when n > 1; it is marked `data-subllm-ref-input` because the ids are
+  React-generated) and sets the files with `page.setInputFiles` (ego) /
+  `set_input_files` (chrome), then (3) polls `attachments()` -> `{count, pending,
+  ready, failed}` until `count == n` and `pending == 0` on two consecutive reads.
+  Pending = an "Uploading ..." progressbar or a chip preview still on a `blob:` src.
+  The Send button stays enabled during upload, so this wait is the only guard.
+  A missing input, failed upload, wrong chip count or the bound (`60 + 15 * n` s)
+  is a `ClientError` before the keypress record: nothing was typed or sent, and the
+  call never falls back to sending without the references.
 - MODE SELECTION (D-8). `selectMode(target)` is a pure step planner for the composer's
   "Thinking effort" slider (levels Instant, Medium, High, Extra High, Pro; `thinking`
   = Medium, `pro` = Pro, or a level name). Radix opens on real pointer input, so the

@@ -73,6 +73,9 @@ class Page:
     def focus(self, sel):
         self.log.append(("focus", sel))
 
+    def set_input_files(self, sel, files):
+        self.log.append(("set_input_files", sel, files))
+
     def click(self, sel, **kw):
         self.log.append(("click", sel))
         if self.fail_on == "click":
@@ -1090,3 +1093,136 @@ def test_post_selection_challenge_or_login_wall_is_human_action_with_login_helpe
         ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
     assert needle in ei.value.detail and "close the window" in ei.value.detail
     assert chrome.log[-2:] == ["close", "spawn"] and not typed(chrome.log)
+
+
+REFS = ["/abs/reference-1.png", "/abs/reference-2.png"]
+NO_CHIPS = {"count": 0, "pending": 0, "ready": 0, "failed": 0}
+REF_INPUT = {"selector": "input[data-subllm-ref-input]"}
+
+
+def chips(n, pending=0, failed=0):
+    return {"count": n, "pending": pending, "ready": n - pending, "failed": failed}
+
+
+def ref_script(attach, **kw):
+    return {"attachments": attach, "referenceInput": kw.get("ref_input", REF_INPUT)}
+
+
+def run_refs(refs=REFS, timeout_s=5):
+    return ChromeDriver().run_image("draw", Path("/unused"), timeout_s=timeout_s, references=refs)
+
+
+def attach_run(chrome, tmp_path, attach, refs=REFS, **kw):
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    page = chrome(
+        {"turnStatus": IMG_DONE, "captureText": {"text": "", "format": "plain"}, **ref_script(attach, **kw)},
+        fetch={IMG_URL: b64(PNG_BYTES)},
+    )
+    return page, ChromeDriver().run_image("draw", out, timeout_s=5, references=refs)
+
+
+def test_references_are_attached_and_ready_before_typing(chrome, tmp_path):
+    page, r = attach_run(chrome, tmp_path, [NO_CHIPS, chips(2, pending=2), chips(2, pending=1), chips(2), chips(2)])
+    assert r.route == "web"
+    log = chrome.log
+    attach = next(i for i, e in enumerate(log) if isinstance(e, tuple) and e[0] == "set_input_files")
+    assert log[attach] == ("set_input_files", "input[data-subllm-ref-input]", REFS)
+    click = next(i for i, e in enumerate(log) if isinstance(e, tuple) and e[0] == "click")
+    assert attach < click < log.index(("press", "Enter"))
+    assert page.calls.index("attachments") < page.calls.index("referenceInput") < page.calls.index("composerMatches")
+    assert page.calls.count("attachments") == 5
+    assert ("referenceInput", True) in page.worlds and ("attachments", True) in page.worlds
+
+
+def test_reference_paths_accept_path_objects(chrome, tmp_path):
+    attach_run(chrome, tmp_path, [NO_CHIPS, chips(1), chips(1)], refs=[Path("/abs/a.png")])
+    assert ("set_input_files", "input[data-subllm-ref-input]", ["/abs/a.png"]) in chrome.log
+
+
+def test_empty_references_leave_the_flow_unchanged(chrome, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    page = chrome({"turnStatus": IMG_DONE, "captureText": {"text": "", "format": "plain"}}, fetch={IMG_URL: b64(PNG_BYTES)})
+    run_image(out)
+    assert "attachments" not in page.calls and "referenceInput" not in page.calls
+    assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] == "set_input_files"]
+
+
+def test_a_dip_in_readiness_resets_the_streak(chrome, tmp_path):
+    page, _ = attach_run(chrome, tmp_path, [NO_CHIPS, chips(1), chips(1, pending=1), chips(1), chips(1)], refs=REFS[:1])
+    assert page.calls.count("attachments") == 5
+
+
+@pytest.mark.parametrize(
+    "attach,needle",
+    [
+        ([NO_CHIPS, chips(2, pending=1)], "1 of 2 ready"),
+        ([NO_CHIPS, chips(1)], "1 of 2 ready"),
+        ([NO_CHIPS, chips(3)], "did not finish uploading"),
+        ([NO_CHIPS, NO_CHIPS], "0 of 2 ready"),
+    ],
+)
+def test_upload_that_never_settles_times_out_as_client_error_with_nothing_typed(chrome, tmp_path, attach, needle):
+    with pytest.raises(ClientError, match=needle) as ei:
+        attach_run(chrome, tmp_path, attach)
+    assert type(ei.value) is ClientError
+    assert typed(chrome.log) == []
+    assert 90 <= chrome.now[0] < 95
+    assert chrome.log[-1] == "close"
+
+
+def test_upload_failure_is_client_error_before_any_key(chrome, tmp_path):
+    with pytest.raises(ClientError, match="upload failed") as ei:
+        attach_run(chrome, tmp_path, [NO_CHIPS, chips(1, pending=1, failed=1)])
+    assert type(ei.value) is ClientError
+    assert typed(chrome.log) == [] and chrome.now[0] < 5
+
+
+def test_missing_file_input_is_client_error_before_any_file_is_set(chrome, tmp_path):
+    with pytest.raises(ClientError, match="no image file input"):
+        attach_run(chrome, tmp_path, [NO_CHIPS], ref_input=None)
+    assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] == "set_input_files"]
+    assert typed(chrome.log) == []
+
+
+def test_composer_holding_attachments_is_refused(chrome, tmp_path):
+    with pytest.raises(ClientError, match="already holds attachments"):
+        attach_run(chrome, tmp_path, [chips(1)])
+    assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] == "set_input_files"]
+
+
+def test_set_input_files_exception_is_client_error_with_nothing_typed(chrome, tmp_path):
+    page = chrome({"turnStatus": IMG_DONE, **ref_script([NO_CHIPS])})
+    page.set_input_files = lambda *a: (_ for _ in ()).throw(RuntimeError("input detached"))
+    with pytest.raises(ClientError, match="input detached") as ei:
+        run_refs()
+    assert type(ei.value) is ClientError and typed(chrome.log) == []
+
+
+def test_relative_reference_is_refused_before_launch(chrome):
+    chrome()
+    with pytest.raises(ClientError, match="not absolute"):
+        run_refs(["rel/ref.png"])
+    assert chrome.log == []
+
+
+def test_references_follow_mode_selection_and_precede_typing(chrome, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    page = chrome(
+        {
+            "turnStatus": IMG_DONE, "captureText": {"text": "", "format": "plain"},
+            "selectMode": [{"current": "Medium", "action": "done", "selected_label": "Medium"}], "auditModel": "ok", "servedModelMenu": None,
+            **ref_script([NO_CHIPS, chips(1), chips(1)]),
+        },
+        fetch={IMG_URL: b64(PNG_BYTES)},
+    )
+    ChromeDriver().run_image("draw", out, timeout_s=5, mode="thinking", references=REFS[:1])
+    assert page.calls.index("selectMode") < page.calls.index("attachments") < page.calls.index("composerMatches")
+
+
+def test_budget_widens_by_the_attach_bound():
+    base = mod._budget(5, "draw", "image")
+    assert mod._budget(5, "draw", "image", 0) == base
+    assert mod._budget(5, "draw", "image", 2) == base + 90

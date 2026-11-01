@@ -18,11 +18,19 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
 from subllm.base import ImageResult, WebTextResult
-from subllm.drivers.chatgpt_web.ego import _collect_images, chatgpt_lock, classify, normalize_prompt
+from subllm.drivers.chatgpt_web.ego import (
+    _collect_images,
+    attach_timeout_s,
+    chatgpt_lock,
+    classify,
+    normalize_prompt,
+    reference_paths,
+)
 from subllm.errors import ClientError
 
 _HERE = Path(__file__).parent
@@ -98,9 +106,9 @@ def _kill_browser(profile: Path) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-def _budget(timeout_s: float, prompt: str, kind: str) -> float:
+def _budget(timeout_s: float, prompt: str, kind: str, references: int = 0) -> float:
     # same formula as the ego subprocess budget
-    return timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
+    return timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0) + attach_timeout_s(references)
 
 
 @contextlib.contextmanager
@@ -185,22 +193,46 @@ class ChromeDriver:
             conversation_url=res["conversation_url"],
         )
 
-    def run_image(self, prompt: str, dest: Path, *, timeout_s: float, mode: str = "default") -> ImageResult:
-        return self._run(prompt, timeout_s, "image", dest, mode)
+    def run_image(
+        self,
+        prompt: str,
+        dest: Path,
+        *,
+        timeout_s: float,
+        mode: str = "default",
+        references: Sequence[str | Path] = (),
+    ) -> ImageResult:
+        return self._run(prompt, timeout_s, "image", dest, mode, reference_paths(references))
 
-    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
+    def _run(
+        self,
+        prompt: str,
+        timeout_s: float,
+        kind: str,
+        dest: Path | None,
+        mode: str = "default",
+        references: Sequence[str] = (),
+    ):
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
         with chatgpt_lock(timeout_s):
             tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
             try:
-                res = self._run_locked(prompt, timeout_s, kind, tmpdir, mode)
+                res = self._run_locked(prompt, timeout_s, kind, tmpdir, mode, references)
                 return res if kind == "text" else _collect_images(res, tmpdir, dest)
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def _run_locked(self, prompt: str, timeout_s: float, kind: str, tmpdir: Path, mode: str = "default") -> dict:
+    def _run_locked(
+        self,
+        prompt: str,
+        timeout_s: float,
+        kind: str,
+        tmpdir: Path,
+        mode: str = "default",
+        references: Sequence[str] = (),
+    ) -> dict:
         profile = profile_dir()
         stack = contextlib.ExitStack()
         try:
@@ -215,7 +247,7 @@ class ChromeDriver:
                 ) from e
             raise ClientError(f"cannot start Google Chrome: {e}") from e
         rec = _Rec()
-        budget = _budget(timeout_s, prompt, kind)
+        budget = _budget(timeout_s, prompt, kind, len(references))
         expired: list[str] = []
 
         gate = rec.gate
@@ -239,7 +271,7 @@ class ChromeDriver:
         timer.start()
         try:
             try:
-                result = _flow(ctx, prompt, timeout_s, kind, tmpdir, rec, mode)
+                result = _flow(ctx, prompt, timeout_s, kind, tmpdir, rec, mode, references)
             except _Stop as s:
                 result = _fail(rec, s.kind, s.detail, s.extra)
             except Exception as e:
@@ -310,11 +342,14 @@ class _Picker:
             self.run(self.restore_to)
 
 
-def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str = "default") -> dict:
+def _flow(
+    ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str = "default",
+    references: Sequence[str] = (),
+) -> dict:
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     picker = _Picker(page)
     try:
-        return _flow_steps(page, picker, prompt, timeout_s, kind, tmpdir, rec, mode)
+        return _flow_steps(page, picker, prompt, timeout_s, kind, tmpdir, rec, mode, references)
     finally:
         # the result is decided; a watchdog expiry from here on only frees a hung restore
         with rec.gate:
@@ -323,7 +358,33 @@ def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec
             picker.restore()
 
 
-def _flow_steps(page, picker: _Picker, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str) -> dict:
+def _attach_references(page, core, references: Sequence[str]) -> None:
+    """Nothing is typed or sent until every reference has a finished chip; any doubt stops here."""
+    want = len(references)
+    if core("attachments").get("count"):
+        raise _Stop("client", "composer already holds attachments")
+    target = core("referenceInput", want)
+    if not target:
+        raise _Stop("client", "no image file input found in the composer")
+    page.set_input_files(target["selector"], list(references))
+    end = _clock() + attach_timeout_s(want)
+    ready_reads = 0
+    while True:
+        a = core("attachments")
+        if a.get("failed"):
+            raise _Stop("client", "reference image upload failed")
+        ready_reads = ready_reads + 1 if a.get("count") == want and a.get("pending") == 0 else 0
+        if ready_reads >= 2:
+            return
+        if _clock() >= end:
+            raise _Stop("client", f"reference images did not finish uploading ({a.get('ready')} of {want} ready)")
+        _sleep(0.25)
+
+
+def _flow_steps(
+    page, picker: _Picker, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec, mode: str,
+    references: Sequence[str] = (),
+) -> dict:
     core = lambda name, *a, **kw: call_core(page, name, *a, **kw)  # noqa: E731
     is_chat = lambda: re.search(r"/c/", urlparse(page.url).path) is not None  # noqa: E731
 
@@ -382,6 +443,9 @@ def _flow_steps(page, picker: _Picker, prompt: str, timeout_s: float, kind: str,
             raise _Stop("quota", "usage limit reached")
         if not after.get("logged_in") or after.get("mode_surface") != "chat" or after.get("busy"):
             raise _Stop("client", "Chat mode not confirmed after mode selection")
+
+    if references:
+        _attach_references(page, core, references)
 
     has_pm = page.evaluate("!!document.querySelector('div.ProseMirror[role=textbox]')")
     page.click("div.ProseMirror[role=textbox]" if has_pm else "#prompt-textarea")

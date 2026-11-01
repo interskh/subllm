@@ -126,6 +126,47 @@ CLOSE_MENU = (
 
 DECODE_IMAGES = "(async () => { await Promise.all(Array.from(document.images).map(i => i.decode())); return true; })()"
 
+UPLOADING = "redesign-composer-attachment-uploading.html"
+READY = "redesign-composer-attachment-ready.html"
+MARKED_LABEL = (
+    "(() => { const m = document.querySelectorAll('[data-subllm-ref-input]');"
+    " return { n: m.length, label: m.length ? m[0].getAttribute('aria-label') : null }; })()"
+)
+SECOND_CHIP = (
+    "(() => { const zone = document.querySelector('[data-composer-attachments] > div');"
+    " const clone = zone.firstElementChild.cloneNode(true);"
+    " clone.querySelectorAll('[aria-label]').forEach(e => e.setAttribute('aria-label',"
+    " e.getAttribute('aria-label').replace('reference-1', 'reference-2')));"
+    " zone.appendChild(clone); return true; })()"
+)
+SECOND_CHIP_UPLOADING = (
+    "(() => { const zone = document.querySelector('[data-composer-attachments] > div');"
+    " const bar = document.createElement('span'); bar.setAttribute('role', 'progressbar');"
+    " bar.setAttribute('aria-label', 'Uploading reference-2.png');"
+    " zone.lastElementChild.querySelector('img').after(bar); return true; })()"
+)
+ALERT_IN_ZONE = (
+    "(() => { const a = document.createElement('div'); a.setAttribute('role', 'alert');"
+    " document.querySelector('[data-composer-attachments]').appendChild(a); return true; })()"
+)
+ERROR_TEXT_IN_ZONE = (
+    "(() => { const a = document.createElement('span'); a.textContent = 'Upload failed';"
+    " document.querySelector('[data-composer-attachments]').appendChild(a); return true; })()"
+)
+SINGLE_INPUTS_ONLY = (
+    "(() => { document.querySelectorAll('input[type=file]').forEach(i => {"
+    " if (i.getAttribute('aria-label') !== 'Attach photos') i.remove(); else i.removeAttribute('multiple'); });"
+    " return true; })()"
+)
+ONLY_CAMERA_INPUT = (
+    "(() => { document.querySelectorAll('input[type=file]').forEach(i => {"
+    " if (i.getAttribute('aria-label') !== 'Take a photo') i.remove(); }); return true; })()"
+)
+OUTSIDE_FORM = (
+    "(() => { document.querySelectorAll('input[type=file]').forEach(i => document.body.appendChild(i));"
+    " return true; })()"
+)
+
 GROUPS = [
     ("redesign-idle-chat.html", [
         ("idle_state", call("state")),
@@ -278,6 +319,50 @@ GROUPS = [
     (COMPLETED, [("completed_menu_btn", call("servedModelMenu", KEY))]),
     ("synthetic-legacy-error-alert.html", [
         ("legacy_alert_probe", SETTLED % (json.dumps(None), json.dumps(None))),
+    ]),
+    ("redesign-idle-chat.html", [
+        ("att_idle", call("attachments")),
+        ("ref_idle_1", call("referenceInput", 1)),
+        ("ref_idle_1_marked", MARKED_LABEL),
+        ("ref_idle_3", call("referenceInput", 3)),
+        ("ref_idle_3_marked", MARKED_LABEL),
+    ]),
+    (UPLOADING, [("att_uploading", call("attachments"))]),
+    (READY, [
+        ("att_ready", call("attachments")),
+        ("pre_editor_att", SET_EDITOR),
+        ("cm_with_attachment", call("composerMatches", "line one\nline two")),
+        ("cm_with_attachment_mismatch", call("composerMatches", "line one")),
+        ("pre_second_chip", SECOND_CHIP),
+        ("att_two_ready", call("attachments")),
+        ("pre_second_uploading", SECOND_CHIP_UPLOADING),
+        ("att_two_one_pending", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_alert", ALERT_IN_ZONE),
+        ("att_alert", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_error_text", ERROR_TEXT_IN_ZONE),
+        ("att_error_text", call("attachments")),
+    ]),
+    ("redesign-idle-chat.html", [
+        ("pre_single_inputs", SINGLE_INPUTS_ONLY),
+        ("ref_single_1", call("referenceInput", 1)),
+        ("ref_single_1_marked", MARKED_LABEL),
+        ("ref_single_2", call("referenceInput", 2)),
+    ]),
+    ("redesign-idle-chat.html", [
+        ("pre_camera_only", ONLY_CAMERA_INPUT),
+        ("ref_camera_only", call("referenceInput", 1)),
+    ]),
+    ("redesign-idle-chat.html", [
+        ("pre_outside_form", OUTSIDE_FORM),
+        ("ref_outside_form", call("referenceInput", 1)),
+    ]),
+    ("synthetic-logged-out.html", [
+        ("att_no_composer", call("attachments")),
+        ("ref_no_composer", call("referenceInput", 1)),
     ]),
 ]
 
@@ -766,3 +851,55 @@ def test_audit_model(r):
     assert r["audit_pro_ok"] == "ok" and r["audit_pro_slug"] == "ok"
     assert r["audit_pro_down"] == "downgrade" and r["audit_pro_down_slug"] == "downgrade"
     assert r["audit_pro_word"] == "downgrade"
+
+
+def test_idle_composer_has_no_attachments(r):
+    assert r["att_idle"] == {"count": 0, "pending": 0, "ready": 0, "failed": 0}
+
+
+def test_reference_input_is_the_multiple_image_input_not_the_camera_one(r):
+    assert r["ref_idle_1"] == {"selector": "input[data-subllm-ref-input]"}
+    assert r["ref_idle_1_marked"] == {"n": 1, "label": "Attach photos"}
+    assert r["ref_idle_3_marked"] == {"n": 1, "label": "Attach photos"}
+
+
+def test_reference_input_never_selects_by_generated_id(r):
+    assert "id" not in r["ref_idle_1"]["selector"] and "#" not in r["ref_idle_1"]["selector"]
+
+
+def test_reference_input_single_file_may_use_a_single_input_but_many_need_multiple(r):
+    assert r["ref_single_1_marked"] == {"n": 1, "label": "Attach photos"}
+    assert r["ref_single_2"] is None
+
+
+def test_reference_input_refuses_the_camera_input_and_inputs_outside_the_form(r):
+    assert r["ref_camera_only"] is None
+    assert r["ref_outside_form"] is None
+
+
+def test_attachments_and_reference_input_without_a_composer(r):
+    assert r["att_no_composer"] == {"count": 0, "pending": 0, "ready": 0, "failed": 0}
+    assert r["ref_no_composer"] is None
+
+
+def test_uploading_chip_is_counted_but_pending(r):
+    assert r["att_uploading"] == {"count": 1, "pending": 1, "ready": 0, "failed": 0}
+
+
+def test_finished_chip_is_ready(r):
+    assert r["att_ready"] == {"count": 1, "pending": 0, "ready": 1, "failed": 0}
+
+
+def test_two_chips_one_still_uploading(r):
+    assert r["att_two_ready"] == {"count": 2, "pending": 0, "ready": 2, "failed": 0}
+    assert r["att_two_one_pending"] == {"count": 2, "pending": 1, "ready": 1, "failed": 0}
+
+
+def test_composer_matches_with_an_attachment_present(r):
+    assert r["cm_with_attachment"] is True
+    assert r["cm_with_attachment_mismatch"] is False
+
+
+def test_an_alert_or_error_text_in_the_attachment_area_is_a_failure(r):
+    assert r["att_alert"]["failed"] >= 1
+    assert r["att_error_text"]["failed"] >= 1

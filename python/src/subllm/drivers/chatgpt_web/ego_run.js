@@ -101,6 +101,25 @@ try {
     }
   }
 
+  if (ARGS.references.length) {
+    // Nothing is typed or sent until every reference has a finished chip; any doubt stops here.
+    const want = ARGS.references.length;
+    if ((await core("attachments")).count > 0) stop("client", "composer already holds attachments");
+    const input = await core("referenceInput", want);
+    if (!input) stop("client", "no image file input found in the composer");
+    await page.setInputFiles(input.selector, ARGS.references);
+    const attachEnd = Date.now() + ARGS.attach_timeout_ms;
+    let readyReads = 0;
+    for (;;) {
+      const a = await core("attachments");
+      if (a.failed) stop("client", "reference image upload failed");
+      readyReads = a.count === want && a.pending === 0 ? readyReads + 1 : 0;
+      if (readyReads >= 2) break;
+      if (Date.now() >= attachEnd) stop("client", "reference images did not finish uploading (" + a.ready + " of " + want + " ready)");
+      await sleep(250);
+    }
+  }
+
   const hasPm = await page.evaluate("!!document.querySelector('div.ProseMirror[role=textbox]')");
   await page.click(hasPm ? "div.ProseMirror[role=textbox]" : "#prompt-textarea", { label: "focus composer" });
   // Any key event can send early, so the durable record comes before the first one.

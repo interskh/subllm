@@ -834,6 +834,7 @@ const __cfg = %CFG%;
 const __log = [];
 const __pick = { i: 0 };
 const __st = { i: 0 };
+const __att = { i: 0 };
 const __typed = { done: false };
 const __next = (list, ix) => { const v = list[Math.min(ix.i, list.length - 1)]; ix.i += 1; return v; };
 let __t = Date.now(); Date.now = () => (__t += 1000);
@@ -852,6 +853,7 @@ const __page = {
     }
   },
   focus: async (sel) => { __log.push("focus " + sel); },
+  setInputFiles: async (sel, files) => { __log.push("setInputFiles " + sel + " " + JSON.stringify(files)); },
   keyboard: {
     type: async () => { __log.push("type"); },
     press: async (k) => { __log.push("press " + k); if (k === "Enter") __typed.done = true; },
@@ -867,6 +869,11 @@ const __page = {
       if (v.hang) return new Promise(() => {});
       if (v.late) return new Promise((r) => __timer(() => r(v), 900));
       return v;
+    }
+    if (call.includes(").attachments(")) { __log.push("attachments"); return __next(__cfg.attach, __att); }
+    if (call.includes(").referenceInput(")) {
+      __log.push("referenceInput " + call.slice(call.indexOf(".referenceInput(") + 16, -1));
+      return "ref_input" in __cfg ? __cfg.ref_input : { selector: "input[data-subllm-ref-input]" };
     }
     if (call.includes(").auditModel(")) { __log.push("auditModel"); return __cfg.audit; }
     if (call.includes(").composerMatches(")) return true;
@@ -885,6 +892,7 @@ const __page = {
 const taskSpace = async () => ({ page: () => __page, finish: async () => { __log.push("finish"); }, handOff: async () => { __log.push("handoff"); } });
 """
 
+_NO_CHIPS = {"count": 0, "pending": 0, "ready": 0, "failed": 0}
 _CHAT = {"logged_in": True, "login_prompt": False, "challenge": False, "mode_surface": "chat", "busy": False, "quota": False}
 
 
@@ -902,13 +910,14 @@ _PRO_PATH = [_CLICK, _FOCUS, _RIGHT, _RIGHT, _RIGHT, _RIGHT, _ESC, _DONE_PRO]
 _RESTORE_PATH = [_act("Pro", action="click", selector="button[aria-label='Select ChatGPT model']"), _act("Pro", action="key", key="ArrowLeft"), _DONE_MED]
 
 
-def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text", menu=None, served_throws=False, click_throws_after_key=False):
+def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text", menu=None, served_throws=False, click_throws_after_key=False, references=(), attach=None, **extra_cfg):
     kp = tmp_path / "keypress"
     body = build_script(
         "hi", space="subllm-chatgpt-abcd1234", timeout_ms=600000, keypress_file=str(kp), mode=mode,
+        references=list(references),
         **({"kind": "image", "image_dir": "/img/dir"} if kind == "image" else {}),
     )
-    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "menu": menu, "served_throws": served_throws, "click_throws_after_key": click_throws_after_key, "images": ["blob:a"] if kind == "image" else []}
+    cfg = {**extra_cfg, "attach": attach or [_NO_CHIPS], "picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "menu": menu, "served_throws": served_throws, "click_throws_after_key": click_throws_after_key, "images": ["blob:a"] if kind == "image" else []}
     runtime = _MODE_RUNTIME.replace("%CFG%", json.dumps(cfg))
     prog = tmp_path / "run.js"
     prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
@@ -1151,3 +1160,151 @@ def test_post_selection_challenge_or_login_wall_is_a_human_action(tmp_path):
         assert not kp.exists() and "type" not in log
         assert (results[0]["kind"], results[0]["detail"]) == ("human_action", detail)
         assert "handoff" in log
+
+
+REFS = ["/abs/reference-1.png", "/abs/reference-2.png"]
+
+
+def _chips(n, pending=0, failed=0):
+    return {"count": n, "pending": pending, "ready": n - pending, "failed": failed}
+
+
+def _attach_ops(log):
+    return [l for l in log if l.startswith(("setInputFiles", "referenceInput", "attachments"))]
+
+
+def _composer_click(log):
+    return next(i for i, l in enumerate(log) if l.startswith("click ") and ("ProseMirror" in l or "prompt-textarea" in l))
+
+
+def test_references_default_to_empty_in_the_script_args():
+    args = json.loads(re.search(r"const ARGS = (.*);\n", script()).group(1))
+    assert args["references"] == [] and args["attach_timeout_ms"] == 0
+
+
+def test_references_and_their_attach_bound_ride_in_the_script_args():
+    body = build_script("hi", space="s", timeout_ms=1, keypress_file="/k", references=REFS)
+    args = json.loads(re.search(r"const ARGS = (.*);\n", body).group(1))
+    assert args["references"] == REFS and args["attach_timeout_ms"] == 90000
+
+
+@needs_node
+def test_empty_references_never_touch_the_attachment_surface(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image")
+    assert not _attach_ops(log)
+    assert results[0]["ok"] is True
+
+
+@needs_node
+def test_references_are_attached_and_ready_before_the_composer_is_touched(tmp_path):
+    attach = [_NO_CHIPS, _chips(2, pending=2), _chips(2, pending=1), _chips(2), _chips(2)]
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS, attach=attach)
+    ops = _attach_ops(log)
+    assert ops[:2] == ["attachments", "referenceInput 2"]
+    assert ops[2] == 'setInputFiles input[data-subllm-ref-input] ["/abs/reference-1.png","/abs/reference-2.png"]'
+    assert ops.count("attachments") == 5
+    assert log.index(ops[2]) < _composer_click(log) < log.index("type") < log.index("press Enter")
+    assert results[0]["ok"] is True
+
+
+@needs_node
+def test_one_ready_read_is_not_enough_a_dip_resets_the_streak(tmp_path):
+    attach = [_NO_CHIPS, _chips(1), _chips(1, pending=1), _chips(1), _chips(1)]
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS[:1], attach=attach)
+    assert log.count("attachments") == 5 and results[0]["ok"] is True
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "attach,needle",
+    [
+        ([_NO_CHIPS, _chips(2, pending=1)], "1 of 2 ready"),
+        ([_NO_CHIPS, _chips(1)], "1 of 2 ready"),
+        ([_NO_CHIPS, _chips(3)], "did not finish uploading"),
+        ([_NO_CHIPS, _NO_CHIPS], "0 of 2 ready"),
+    ],
+)
+def test_upload_that_never_settles_is_a_client_error_with_nothing_typed_or_sent(tmp_path, attach, needle):
+    kp, log, results, out = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS, attach=attach)
+    assert not kp.exists()
+    assert not [l for l in log if l.startswith(("click ", "type", "press"))]
+    assert len(results) == 1 and results[0]["ok"] is False and results[0]["kind"] == "client"
+    assert needle in results[0]["detail"]
+    assert "finish" in log
+
+
+@needs_node
+def test_upload_failure_stops_before_any_keypress_without_waiting_for_the_bound(tmp_path):
+    attach = [_NO_CHIPS, _chips(1, pending=1, failed=1)]
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS, attach=attach)
+    assert not kp.exists() and log.count("attachments") == 2
+    assert results[0]["kind"] == "client" and "upload failed" in results[0]["detail"]
+    assert not [l for l in log if l.startswith(("type", "press"))]
+
+
+@needs_node
+def test_missing_file_input_is_a_client_error_before_any_file_is_set(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS, ref_input=None)
+    assert not kp.exists() and not [l for l in log if l.startswith("setInputFiles")]
+    assert results[0]["kind"] == "client" and "no image file input" in results[0]["detail"]
+
+
+@needs_node
+def test_a_composer_that_already_holds_attachments_is_refused(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image", references=REFS, attach=[_chips(1)])
+    assert not kp.exists() and not [l for l in log if l.startswith(("setInputFiles", "referenceInput"))]
+    assert results[0]["kind"] == "client" and "already holds attachments" in results[0]["detail"]
+
+
+@needs_node
+def test_references_follow_mode_selection_and_precede_typing(tmp_path):
+    attach = [_NO_CHIPS, _chips(1), _chips(1)]
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], kind="image", references=REFS[:1], attach=attach)
+    assert log.index("selectMode pro") < next(i for i, l in enumerate(log) if l.startswith("setInputFiles"))
+    assert results[0]["ok"] is True
+
+
+def test_relative_reference_is_refused_before_any_subprocess(egoimg):
+    egoimg(img_ok("img-1"), "")
+    with pytest.raises(ClientError, match="not absolute"):
+        EgoDriver().run_image("draw", egoimg.out, timeout_s=5, references=["rel/ref.png"])
+    assert not (egoimg.dir / "ran").exists()
+
+
+def test_image_references_reach_the_script_and_widen_the_subprocess_budget(egoimg, monkeypatch, tmp_path):
+    import subllm.drivers.chatgpt_web.ego as mod
+
+    egoimg(img_ok("img-1"), 'cp "$STUB_DIR/png.bin" "$idir/img-1"')
+    real = mod.subprocess.run
+    seen = {}
+
+    def spy(cmd, **kw):
+        if cmd[1:] == ["nodejs"]:
+            seen["t"] = kw["timeout"]
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(mod.subprocess, "run", spy)
+    ref = tmp_path / "ref.png"
+    EgoDriver().run_image("draw", egoimg.out, timeout_s=7, references=[ref, REFS[0]])
+    line = next(l for l in (egoimg.dir / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    assert json.loads(line[len("const ARGS = "):].rstrip(";"))["references"] == [str(ref), REFS[0]]
+    assert seen["t"] == 7 + 120 + int(len("draw") * 0.06) + 60 + 90
+
+
+def test_image_without_references_keeps_the_original_budget(egoimg, monkeypatch):
+    import subllm.drivers.chatgpt_web.ego as mod
+
+    egoimg(img_ok("img-1"), 'cp "$STUB_DIR/png.bin" "$idir/img-1"')
+    real = mod.subprocess.run
+    seen = {}
+
+    def spy(cmd, **kw):
+        if cmd[1:] == ["nodejs"]:
+            seen["t"] = kw["timeout"]
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(mod.subprocess, "run", spy)
+    run_image(egoimg.out, timeout_s=7)
+    assert seen["t"] == 7 + 120 + int(len("draw") * 0.06) + 60
+    line = next(l for l in (egoimg.dir / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    assert json.loads(line[len("const ARGS = "):].rstrip(";"))["references"] == []

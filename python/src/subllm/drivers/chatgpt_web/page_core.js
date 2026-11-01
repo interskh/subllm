@@ -131,6 +131,40 @@
     return norm(got) === norm(prompt);
   };
 
+  // Reference images: the hidden file inputs sit inside the composer form and their ids are
+  // React-generated, so the chosen input gets a marker attribute and the substrate selects on that.
+  const REF_MARK = "data-subllm-ref-input";
+  const composerForm = () => {
+    const c = composerEl();
+    return c && c.closest("form");
+  };
+  const acceptTokens = (i) => (i.getAttribute("accept") || "").split(",").map((t) => t.trim()).filter(Boolean);
+  const referenceInput = (count) => {
+    const form = composerForm();
+    if (!form) return null;
+    for (const old of q(document, "[" + REF_MARK + "]")) old.removeAttribute(REF_MARK);
+    // Camera capture inputs open the device camera, not a file picker.
+    const cands = q(form, "input[type=file]").filter((i) =>
+      !i.disabled && !i.hasAttribute("capture") && acceptTokens(i).includes("image/*") && (count <= 1 || i.multiple));
+    if (!cands.length) return null;
+    const rank = (i) => (i.multiple ? 0 : 100) + acceptTokens(i).length;
+    cands.sort((a, b) => rank(a) - rank(b));
+    cands[0].setAttribute(REF_MARK, "");
+    return { selector: "input[" + REF_MARK + "]" };
+  };
+  const ATTACH_ERROR_RE = /fail|error|unsupported|too large|couldn.?t|unable|invalid/i;
+  const attachments = () => {
+    const form = composerForm();
+    if (!form) return { count: 0, pending: 0, ready: 0, failed: 0 };
+    const count = q(form, "button[aria-label^='Remove ']").length;
+    const bars = q(form, "[role=progressbar][aria-label^='Uploading']").length;
+    const blobs = q(form, "[data-composer-attachments] img").filter((i) => /^blob:/.test(i.getAttribute("src") || "")).length;
+    const pending = Math.max(bars, blobs);
+    const zone = form.querySelector("[data-composer-attachments]");
+    const failed = zone ? q(zone, "[role=alert]").length + (ATTACH_ERROR_RE.test(zone.innerText || "") ? 1 : 0) : 0;
+    return { count, pending, ready: Math.max(0, count - pending), failed };
+  };
+
   const acceptance = (url) => {
     const out = { state: "pending", turn_key: null, conversation_url: null };
     let u;
@@ -293,5 +327,5 @@
     return /\bpro\b/i.test(served) ? "ok" : "downgrade";
   };
 
-  return { state, composerMatches, acceptance, turnStatus, captureText, servedModel, servedModelMenu, selectMode, auditModel };
+  return { state, composerMatches, referenceInput, attachments, acceptance, turnStatus, captureText, servedModel, servedModelMenu, selectMode, auditModel };
 })()

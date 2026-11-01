@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from subllm._images import save_numbered
@@ -62,6 +63,19 @@ def chatgpt_lock(timeout_s: float):
         fd.close()
 
 
+def attach_timeout_s(n: int) -> float:
+    """Bounded wait for n reference images to finish uploading to the composer."""
+    return 60.0 + 15.0 * n if n else 0.0
+
+
+def reference_paths(references: Sequence[str | Path]) -> list[str]:
+    out = [str(r) for r in references]
+    for r in out:
+        if not Path(r).is_absolute():
+            raise ClientError(f"reference image path is not absolute: {r}")
+    return out
+
+
 def normalize_prompt(prompt: str) -> str:
     # keyboard.type presses Enter for "\r" and moves focus for "\t"
     return prompt.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
@@ -86,6 +100,7 @@ def build_script(
     kind: str = "text",
     image_dir: str | None = None,
     mode: str = "default",
+    references: Sequence[str] = (),
 ) -> str:
     args = {
         "prompt": prompt,
@@ -95,6 +110,8 @@ def build_script(
         "kind": kind,
         "image_dir": image_dir,
         "mode": mode,
+        "references": list(references),
+        "attach_timeout_ms": int(attach_timeout_s(len(references)) * 1000),
     }
     try:
         core = (_HERE / "page_core.js").read_text()
@@ -183,17 +200,41 @@ class EgoDriver:
             conversation_url=res["conversation_url"],
         )
 
-    def run_image(self, prompt: str, dest: Path, *, timeout_s: float, mode: str = "default") -> ImageResult:
-        return self._run(prompt, timeout_s, "image", dest, mode)
+    def run_image(
+        self,
+        prompt: str,
+        dest: Path,
+        *,
+        timeout_s: float,
+        mode: str = "default",
+        references: Sequence[str | Path] = (),
+    ) -> ImageResult:
+        return self._run(prompt, timeout_s, "image", dest, mode, reference_paths(references))
 
-    def _run(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
+    def _run(
+        self,
+        prompt: str,
+        timeout_s: float,
+        kind: str,
+        dest: Path | None,
+        mode: str = "default",
+        references: Sequence[str] = (),
+    ):
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
         with chatgpt_lock(timeout_s):
-            return self._run_locked(prompt, timeout_s, kind, dest, mode)
+            return self._run_locked(prompt, timeout_s, kind, dest, mode, references)
 
-    def _run_locked(self, prompt: str, timeout_s: float, kind: str, dest: Path | None, mode: str = "default"):
+    def _run_locked(
+        self,
+        prompt: str,
+        timeout_s: float,
+        kind: str,
+        dest: Path | None,
+        mode: str = "default",
+        references: Sequence[str] = (),
+    ):
         tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
         keypress = tmpdir / "keypress"
         try:
@@ -205,8 +246,12 @@ class EgoDriver:
                 kind=kind,
                 image_dir=str(tmpdir),
                 mode=mode,
+                references=references,
             )
-            budget = timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
+            budget = (
+                timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
+                + attach_timeout_s(len(references))
+            )
             out = err = ""
             code: int | None = None
             expired: str | None = None

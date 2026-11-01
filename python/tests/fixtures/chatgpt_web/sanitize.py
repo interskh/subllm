@@ -44,7 +44,9 @@ def sanitize(src: str, allow: set[str]) -> str:
         src = re.sub(rf"<{tag}\b([^>]*)>.*?</{tag}>", rf"<{tag}\1></{tag}>", src, flags=re.S | re.I)
     src = re.sub(r'\sstyle="[^"]*"', "", src)
     src = re.sub(r'\shref="[^"]*"', ' href="#"', src)
-    src = re.sub(r'\ssrc="(?!/cdn/assets/)[^"]*"', ' src=""', src)
+    src = re.sub(r'\ssrc="blob:[^"]*"', ' src="blob:https://chatgpt.com/synthetic"', src)
+    src = re.sub(r'\ssrc="data:(image/[a-z+.-]+);[^"]*"', r' src="data:\1;base64,AAAA"', src)
+    src = re.sub(r'\ssrc="(?!/cdn/assets/|blob:https://chatgpt.com/synthetic"|data:image/[a-z+.-]+;base64,AAAA")[^"]*"', ' src=""', src)
     src = re.sub(r'\s(srcset|alt|title|data-placeholder)="[^"]*"', "", src)
     src = re.sub(r'\s(data-[a-z-]*(?:name|email)[a-z-]*)="[^"]*"', r' \1="User"', src)
 
