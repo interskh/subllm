@@ -298,3 +298,41 @@ implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
 - Deferred: a live completed-image DOM capture (synthetic fixture stands in) and a live check of the stability rule against a progressive preview; a failed write of file 2 of 2 leaves file 1 in out_dir (the error carries the URL); a duplicated path in the script's `images` list would be copied twice (the script builds the list itself). Slice-2 deferred items remain open (flock OSError other than EWOULDBLOCK, `WebTextResult.conversation_url` typing, `finish()` after an error, real error placement on chatgpt.com).
 
 implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
+
+## Slice 4 — Chrome fallback
+
+### T1 — ChromeDriver
+
+**Decisions**
+- Seam deviates from the brief's `_launch_context(playwright, profile)`: `_open_context(profile)` is a contextmanager that owns `sync_playwright()` AND `launch_persistent_context(channel="chrome", headless=False, no_viewport=True)`, so stubs never start the patchright Node driver. The login spawn `_spawn_login()` is the second seam. The `login` helper (`chrome.main(["login"])`) goes through the same `_open_context`.
+- Worlds (patchright 1.64.3 source: `Page.evaluate(..., isolated_context=True)` default): `call_core(page, name, *args, main_world=False)`. Main world only for `captureText` (clipboard override must see the page's Copy handler) and the image `fetch`; all DOM reads stay isolated (patchright's stealth). Expression string is built exactly like ego (`"(" + CORE + ")." + name + "(args)"`, no `arg`).
+- `ego.py`: `_map` = `parse_output` + new `classify(events, results, code, sent, expired, tail, browser)`; `_map` kept as a thin wrapper. `chatgpt_lock(timeout_s)` contextmanager (lazy `import fcntl`) now serves both drivers (same path, messages, polling). Failure text uses `_NAMES[browser]` ("ego-browser" byte-identical for ego).
+- Chrome builds in-process events/result dicts (`_Rec`, `_Stop`) and calls `classify(..., 0, rec.sent, None, "", "chrome")`; any non-`_Stop` exception becomes `kind client`, so pre-keypress = ClientError, post = SendUnconfirmedError (+accepted URL). `rec.sent = True` is set before the first key event.
+- Human action: the context is closed (ExitStack exit) BEFORE `_spawn_login()`; spawn failure still raises HumanActionRequired with a "could not be opened" detail. The helper takes no lock; a retry while its window is open hits the profile-in-use ClientError (message names it).
+- Image bytes: in-page `fetch` -> `FileReader.readAsDataURL` (no stack-limited `fromCharCode`) -> base64 returned -> `b64decode(validate=True)` -> `<tmpdir>/img-N` -> ego `_collect_images` unchanged.
+- State loop tolerates evaluate exceptions (navigation destroying the context) until the 45 s end; ego would fail at once. Pre-send only, so safe.
+- Clocks: module `_clock`/`_sleep` (tests patch them). Hermetic guard: autouse fixture in conftest patches both seams to `pytest.fail` unless the test has `browser`/`integration` marker.
+- Deps: `uv add --optional chrome patchright` equivalent; env has `UV_FROZEN=1`, so lock needed `env -u UV_FROZEN`. `uv.lock` also moved `exclude-newer` 2026-05-26 -> 2026-10-25 (uv span rewrite); other changes are additions (patchright 1.64.3, greenlet, pyee).
+
+**Rejected**
+- Seam taking a `playwright` object (driver still starts in stubs). Importing patchright's `TimeoutError` (goto timeout detected by class name, no import needed). Isolated-world fetch of `blob:` (untestable offline; main world is the safe side). Spawning the login window as a child context of the run (Playwright kills Chrome when the parent exits).
+
+**Assumptions** (T2 / live must verify)
+- `captureText` in the main world sees the page's Copy handler; `blob:` fetch works from the main world; isolated-world DOM reads match the main-world DOM. None run offline.
+- `ctx.wait_for_event("close", timeout=0)` fires when the user closes the window; `ctx.pages[0]` exists for a persistent context.
+- `page.click(selector)` plus per-key `keyboard.type(delay=40)` is accepted by chatgpt.com like ego's (D-3a); unverified in Chrome.
+- The detached helper can `import subllm` (same interpreter, installed package).
+
+**Deferred**
+- `_resolve_driver` fallback wiring, README, drivers-contract, CLI `--browser chrome` docs: T3. Browser-marker Chrome fixture tests: T2. A real-Chrome launch was never run (user decision).
+
+**Touches**
+- New: `drivers/chatgpt_web/chrome.py`, `tests/test_chatgpt_web_chrome.py`. Edited: `drivers/chatgpt_web/ego.py` (classify, chatgpt_lock; ego behaviour unchanged, no ego test edited), `tests/conftest.py` (autouse guard: affects every test), `pyproject.toml` (extra `chrome`), `uv.lock`.
+- T3: `chatgpt_web.py` imports `EgoDriver, normalize_prompt` from ego; wire `ChromeDriver` there; `HumanActionRequired.browser` now "chrome" is possible (CLI handler for exit 3 should not assume "ego").
+- Mutation battery: 8/8 caught (sent-after-typing, spawn-before-close, browser hardcoded, captureText isolated, image bytes reversed, rejected ignored, sent ignored, lock not taken).
+
+**Review fixes (T1)**
+- Image fetch is bounded: the in-page script uses an AbortController (30 s) around fetch and the blob read, so a stall rejects -> client -> SendUnconfirmedError and the lock is released (patchright `evaluate` has no default timeout).
+- Login helper waits on the opened page's `close` event, then leaves `_open_context`, which closes the context so Chrome exits (on macOS the context `close` event only fires when the browser process quits).
+- The three availability/launch tests inject fake `patchright` modules via `sys.modules`; verified by running the whole chrome test file with `sys.modules["patchright"] = None` (50 passed).
+- Mutants: fetch bound removed and login wait reverted to the context were each caught by a new test.

@@ -9,6 +9,11 @@ dependencies = ["pydantic>=2.6"]
 [project.scripts]
 subllm = "subllm.cli:main"
 
+[project.optional-dependencies]
+chrome = [
+    "patchright",
+]
+
 [dependency-groups]
 dev = ["pytest>=8"]
 

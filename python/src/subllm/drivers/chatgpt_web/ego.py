@@ -6,6 +6,7 @@ send key may have been pressed (the keypress record exists) nothing is retried.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
@@ -34,6 +35,31 @@ _GUIDE_RE = re.compile(r"usage guide v(\d+)\.(\d+)\.(\d+)")
 
 def lock_path() -> Path:
     return Path.home() / ".local/share/subllm/chatgpt-web.lock"
+
+
+@contextlib.contextmanager
+def chatgpt_lock(timeout_s: float):
+    import fcntl
+
+    path = lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(path, "a")
+    except OSError as e:
+        raise ClientError(f"cannot open the chatgpt-web lock {path}: {e}") from e
+    try:
+        end = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    raise ClientError(f"another chatgpt-web call holds {path}") from None
+                time.sleep(min(0.25, max(0.01, end - time.monotonic())))
+        yield
+    finally:
+        fd.close()
 
 
 def normalize_prompt(prompt: str) -> str:
@@ -156,27 +182,8 @@ class EgoDriver:
         prompt = normalize_prompt(prompt)
         if not prompt.strip():
             raise ClientError("the prompt is empty")
-        import fcntl
-
-        path = lock_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = open(path, "a")
-        except OSError as e:
-            raise ClientError(f"cannot open the chatgpt-web lock {path}: {e}") from e
-        try:
-            end = time.monotonic() + timeout_s
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except OSError:
-                    if time.monotonic() >= end:
-                        raise ClientError(f"another chatgpt-web call holds {path}") from None
-                    time.sleep(min(0.25, max(0.01, end - time.monotonic())))
+        with chatgpt_lock(timeout_s):
             return self._run_locked(prompt, timeout_s, kind, dest)
-        finally:
-            fd.close()
 
     def _run_locked(self, prompt: str, timeout_s: float, kind: str, dest: Path | None):
         tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
@@ -252,8 +259,23 @@ def _txt(v) -> str:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
+_NAMES = {"ego": "ego-browser", "chrome": "chrome driver"}
+
+
 def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) -> dict:
     events, results = parse_output(out + "\n" + err)
+    return classify(events, results, code, sent, expired, err.strip()[-400:], "ego")
+
+
+def classify(
+    events: list[dict],
+    results: list[dict],
+    code: int | None,
+    sent: bool,
+    expired: str | None,
+    tail: str,
+    browser: str,
+) -> dict:
     res = results[0] if len(results) == 1 else None
     url = None
     for ev in events:
@@ -261,19 +283,18 @@ def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) 
             url = ev["conversation_url"]
     if url is None and res:
         url = res.get("conversation_url")
-    tail = err.strip()[-400:]
 
     if not sent:
         if expired:
             raise ClientError(expired)
         if res is None:
-            raise ClientError(f"ego-browser produced no result: {tail}")
+            raise ClientError(f"{_NAMES[browser]} produced no result: {tail}")
         if res.get("ok"):
-            raise ClientError("ego-browser reported success but no send was recorded")
+            raise ClientError(f"{_NAMES[browser]} reported success but no send was recorded")
         kind, detail = res.get("kind"), res.get("detail") or ""
         if kind == "human_action":
             raise HumanActionRequired(
-                f"chatgpt.com needs a person: {detail}", browser="ego", detail=detail
+                f"chatgpt.com needs a person: {detail}", browser=browser, detail=detail
             )
         if kind == "quota":
             raise QuotaError(f"chatgpt.com usage limit: {detail}")
@@ -287,7 +308,7 @@ def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) 
         if code == 0:
             return {**res, "conversation_url": url}
         raise SendUnconfirmedError(
-            f"ego-browser exited {code} after reporting success", conversation_url=url
+            f"{_NAMES[browser]} exited {code} after reporting success", conversation_url=url
         )
     kind, detail = res.get("kind"), res.get("detail") or ""
     rejected = any(ev.get("phase") == "rejected" for ev in events)
