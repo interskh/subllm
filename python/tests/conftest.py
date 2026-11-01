@@ -37,5 +37,9 @@ def _no_real_chrome(request, monkeypatch):
     def _spawn(*args, **kwargs):
         pytest.fail("real Chrome login spawn in a hermetic test")
 
+    def _kill(*args, **kwargs):
+        pytest.fail("real Chrome kill in a hermetic test")
+
+    monkeypatch.setattr(chrome, "_kill_browser", _kill)
     monkeypatch.setattr(chrome, "_open_context", _launch)
     monkeypatch.setattr(chrome, "_spawn_login", _spawn)

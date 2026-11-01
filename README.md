@@ -222,13 +222,21 @@ Install the extra and Google Chrome:
 pip install 'subllm[chrome]'     # or, in a checkout: uv sync --extra chrome
 ```
 
-Google Chrome must be installed. The driver uses patchright with channel
+Google Chrome must be installed where patchright's `chrome` channel looks: macOS
+`/Applications/Google Chrome.app`, Linux `/opt/google/chrome/chrome`, Windows under
+`Program Files` or `%LOCALAPPDATA%` (a copy in `~/Applications` or another PATH
+location is not found). The driver uses patchright with channel
 `chrome`, so no Chromium is downloaded. It runs headful on a subllm-owned
 profile at `~/.local/share/subllm/chrome-profile`, not your daily profile.
 
 One-time login: on first use, or when chatgpt.com shows a login wall, a Chrome
 window opens on that profile and `HumanActionRequired` is raised (CLI exit 3).
 Log in, close the window, and retry. Calls fail while that window is open.
+
+A call is bounded: if Chrome stops responding for `timeout_s` + 120 s (+ prompt-length
+and image allowances, the same budget as ego lite), the driver kills the Chrome
+that owns the subllm profile and raises (`ClientError` before the send,
+`SendUnconfirmedError` after it).
 
 The Chrome path to chatgpt.com has **not been verified live**: it is covered by
 offline fixture tests only (`SUBLLM_BROWSER=1`, see Testing).
@@ -475,7 +483,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (574 passed, 77 skipped)
+uv run pytest                 # no subscription, no network (584 passed, 77 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized

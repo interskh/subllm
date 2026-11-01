@@ -9,11 +9,14 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -23,9 +26,13 @@ from subllm.drivers.chatgpt_web.ego import _collect_images, chatgpt_lock, classi
 from subllm.errors import ClientError
 
 _HERE = Path(__file__).parent
-_MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-_MAC_CHROME_USER = "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-_LINUX_CHROME = ("google-chrome", "google-chrome-stable")
+# patchright's channel="chrome" lookup (coreBundle.js _createChromiumChannel), per platform
+_CHROME_PATHS = {
+    "darwin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "linux": "/opt/google/chrome/chrome",
+    "win32": "\\Google\\Chrome\\Application\\chrome.exe",
+}
+_WIN_PREFIX_ENV = ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)")
 _LOGIN_ARGV = [sys.executable, "-m", "subllm.drivers.chatgpt_web.chrome", "login"]
 _HOME_URL = "https://chatgpt.com/"
 
@@ -57,15 +64,43 @@ def profile_dir() -> Path:
     return Path.home() / ".local/share/subllm/chrome-profile"
 
 
+def _chrome_candidates() -> list[str]:
+    suffix = _CHROME_PATHS.get(sys.platform)
+    if suffix is None:
+        return []
+    if sys.platform != "win32":
+        return [suffix]
+    drive = os.environ.get("HOMEDRIVE", "")
+    prefixes = [os.environ.get(k) for k in _WIN_PREFIX_ENV] + [drive + "\\Program Files", drive + "\\Program Files (x86)"]
+    return [p + suffix for p in prefixes if p]
+
+
 def _chrome_executable() -> str | None:
-    for p in (_MAC_CHROME, str(Path.home() / _MAC_CHROME_USER)):
-        if Path(p).is_file():
+    for p in _chrome_candidates():
+        if Path(p).is_file() and os.access(p, os.R_OK):
             return p
-    for name in _LINUX_CHROME:
-        found = shutil.which(name)
-        if found:
-            return found
     return None
+
+
+def _browser_pid(profile: Path) -> int | None:
+    # Chrome's SingletonLock is a symlink "<host>-<pid>" inside the profile dir
+    try:
+        pid = int(os.readlink(profile / "SingletonLock").rsplit("-", 1)[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if pid > 1 else None
+
+
+def _kill_browser(profile: Path) -> None:
+    """SIGKILL the Chrome that owns this profile (never by name)."""
+    pid = _browser_pid(profile)
+    if pid is not None:
+        os.kill(pid, signal.SIGKILL)
+
+
+def _budget(timeout_s: float, prompt: str, kind: str) -> float:
+    # same formula as the ego subprocess budget
+    return timeout_s + 120 + int(len(prompt) * 0.06) + (60 if kind == "image" else 0)
 
 
 @contextlib.contextmanager
@@ -119,6 +154,7 @@ class _Stop(Exception):
 class _Rec:
     def __init__(self) -> None:
         self.sent = False
+        self.dead = False
         self.url: str | None = None
         self.events: list[dict] = []
 
@@ -130,7 +166,8 @@ class ChromeDriver:
         except ImportError:
             return False, "patchright is not installed (pip install 'subllm[chrome]')"
         if _chrome_executable() is None:
-            return False, "Google Chrome is not installed"
+            where = (_chrome_candidates() or ["a supported location"])[0]
+            return False, f"Google Chrome is not installed at {where}; the subllm[chrome] driver needs it"
         return True, "ok"
 
     def check_guide(self) -> None:
@@ -168,11 +205,26 @@ class ChromeDriver:
             ctx = stack.enter_context(_open_context(profile))
         except Exception as e:
             stack.close()
-            raise ClientError(
-                f"cannot start Google Chrome with the subllm profile {profile} "
-                f"(another Chrome window may be using it): {e}"
-            ) from e
+            if re.search(r"profile|singleton|in use|existing browser session", str(e), re.I):
+                raise ClientError(
+                    f"cannot start Google Chrome with the subllm profile {profile} "
+                    f"(another Chrome window may be using it): {e}"
+                ) from e
+            raise ClientError(f"cannot start Google Chrome: {e}") from e
         rec = _Rec()
+        budget = _budget(timeout_s, prompt, kind)
+        expired: list[str] = []
+
+        def _fire() -> None:
+            rec.dead = True
+            expired.append(f"Chrome timed out after {budget:.0f}s")
+            with contextlib.suppress(Exception):
+                _kill_browser(profile)
+
+        # a frozen renderer blocks evaluate forever; only killing the browser frees it
+        timer = threading.Timer(budget, _fire)
+        timer.daemon = True
+        timer.start()
         try:
             try:
                 result = _flow(ctx, prompt, timeout_s, kind, tmpdir, rec)
@@ -181,16 +233,18 @@ class ChromeDriver:
             except Exception as e:
                 result = _fail(rec, "client", f"{type(e).__name__}: {e}")
         finally:
+            timer.cancel()
             with contextlib.suppress(Exception):
                 stack.close()
         if not rec.sent and not result.get("ok") and result.get("kind") == "human_action":
+            action = "solve the challenge" if "challenge" in result["detail"] else "log in to chatgpt.com"
             try:
                 _spawn_login()
-                how = "log in to chatgpt.com in the Chrome window that opened, close the window, then retry"
+                how = f"{action} in the Chrome window that opened, close the window, then retry"
             except Exception as e:
                 how = f"the Chrome window for logging in could not be opened ({e}); retry after logging in"
             result["detail"] = f"{result['detail']}; {how}"
-        return classify(rec.events, [result], 0, rec.sent, None, "", "chrome")
+        return classify(rec.events, [result], 0, rec.sent, None if result.get("ok") else (expired[0] if expired else None), "", "chrome")
 
 
 def _fail(rec: _Rec, kind: str, detail: str) -> dict:
@@ -224,6 +278,8 @@ def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec
         try:
             st = core("state")
         except Exception as e:
+            if rec.dead:
+                raise
             last_err = e
             _sleep(0.5)
             continue

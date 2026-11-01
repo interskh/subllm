@@ -4,6 +4,8 @@ import fcntl
 import re
 import subprocess
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from .test_chatgpt_web_ego import PNG_BYTES, URL
 
 _REAL_SPAWN = mod._spawn_login
 _REAL_OPEN = mod._open_context
+_REAL_KILL = mod._kill_browser
 _CORE = (Path(mod.__file__).parent / "page_core.js").read_text()
 
 LOGGED_IN = {"logged_in": True, "challenge": False, "login_prompt": False, "quota": False, "mode_surface": "chat", "busy": False}
@@ -233,7 +236,7 @@ def test_login_wall_closes_context_then_spawns(chrome):
     with pytest.raises(HumanActionRequired) as ei:
         run()
     assert ei.value.browser == "chrome"
-    assert "close the window" in ei.value.detail
+    assert "close the window" in ei.value.detail and "log in to chatgpt.com" in ei.value.detail
     assert chrome.log[-2:] == ["close", "spawn"]
     assert chrome.now[0] >= 45
     assert typed(chrome.log) == []
@@ -254,6 +257,7 @@ def test_challenge_is_human_action(chrome):
         run()
     assert ei.value.browser == "chrome"
     assert "Cloudflare" in ei.value.detail
+    assert "solve the challenge" in ei.value.detail and "log in" not in ei.value.detail
     assert chrome.now[0] < 5
 
 
@@ -488,6 +492,19 @@ def test_launch_failure_is_client_error_naming_the_profile(chrome, monkeypatch):
         run()
 
 
+def test_other_launch_failure_passes_the_cause_through_plainly(chrome, monkeypatch):
+    @contextlib.contextmanager
+    def boom(profile):
+        raise RuntimeError("Executable doesn't exist at /x")
+        yield
+
+    chrome()
+    monkeypatch.setattr(mod, "_open_context", boom)
+    with pytest.raises(ClientError) as ei:
+        run()
+    assert "Executable doesn't exist" in str(ei.value) and "another Chrome window" not in str(ei.value)
+
+
 def test_held_lock_blocks_before_launch(chrome, tmp_path):
     chrome()
     p = lock_path()
@@ -522,9 +539,10 @@ def _fake_patchright(monkeypatch):
 
 def test_available_needs_chrome(monkeypatch):
     _fake_patchright(monkeypatch)
+    _fake_patchright(monkeypatch)
     monkeypatch.setattr(mod, "_chrome_executable", lambda: None)
     ok, reason = ChromeDriver().available()
-    assert not ok and "Google Chrome is not installed" in reason
+    assert not ok and "Google Chrome is not installed at" in reason and "subllm[chrome]" in reason
 
 
 def test_available_ok(monkeypatch):
@@ -533,18 +551,40 @@ def test_available_ok(monkeypatch):
     assert ChromeDriver().available() == (True, "ok")
 
 
-def test_chrome_executable_lookup(monkeypatch, tmp_path):
+def test_chrome_executable_mirrors_patchright_channel_paths(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(mod, "_MAC_CHROME", str(tmp_path / "none"))
-    monkeypatch.setattr(mod.shutil, "which", lambda n: None)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    fake = tmp_path / "Chrome"
+    monkeypatch.setitem(mod._CHROME_PATHS, "darwin", str(fake))
     assert mod._chrome_executable() is None
-    user = tmp_path / mod._MAC_CHROME_USER
+    # ~/Applications and a PATH google-chrome are not where channel="chrome" looks
+    user = tmp_path / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     user.parent.mkdir(parents=True)
     user.write_text("")
-    assert mod._chrome_executable() == str(user)
-    user.unlink()
-    monkeypatch.setattr(mod.shutil, "which", lambda n: "/usr/bin/google-chrome" if n == "google-chrome" else None)
-    assert mod._chrome_executable() == "/usr/bin/google-chrome"
+    monkeypatch.setattr(mod.shutil, "which", lambda n: str(user))
+    assert mod._chrome_executable() is None
+    fake.write_text("")
+    assert mod._chrome_executable() == str(fake)
+
+
+def test_chrome_candidates_per_platform(monkeypatch):
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    assert mod._chrome_candidates() == ["/opt/google/chrome/chrome"]
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    assert mod._chrome_candidates() == ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", "L")
+    monkeypatch.setenv("PROGRAMFILES", "P")
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.setenv("HOMEDRIVE", "C:")
+    assert mod._chrome_candidates() == [
+        "L\\Google\\Chrome\\Application\\chrome.exe",
+        "P\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    ]
+    monkeypatch.setattr(mod.sys, "platform", "freebsd")
+    assert mod._chrome_candidates() == []
 
 
 def test_check_guide_is_a_noop():
@@ -666,3 +706,93 @@ def test_real_open_context_uses_the_persistent_chrome_profile(monkeypatch, tmp_p
         assert ctx.closed is False
     assert ctx.closed is True
     assert calls == {"user_data_dir": str(tmp_path / "p"), "channel": "chrome", "headless": False, "no_viewport": True}
+
+
+class Blocking:
+    """A page whose core calls hang until the kill seam releases them."""
+
+    def __init__(self, page, block_on):
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        orig = page.evaluate
+
+        def evaluate(expr, **kw):
+            if not expr.startswith("!!") and re.match(r"\w+", expr[len(_CORE) + 3 :] or "") and \
+                    re.match(r"\w+", expr[len(_CORE) + 3 :]).group(0) == block_on:
+                self.entered.set()
+                if not self.release.wait(10):
+                    raise AssertionError("the kill seam never ran (timer not armed)")
+                raise RuntimeError("Target page, context or browser has been closed")
+            return orig(expr, **kw)
+
+        page.evaluate = evaluate
+
+
+def _arm(monkeypatch, kills, block):
+    monkeypatch.setattr(mod, "_budget", lambda *a: 0.2)
+    monkeypatch.setattr(mod, "_kill_browser", lambda profile: (kills.append(profile), block.release.set()))
+    # real clocks for the timer test: the flow itself never loops while blocked
+    monkeypatch.setattr(mod, "_clock", time.monotonic)
+    monkeypatch.setattr(mod, "_sleep", lambda s: None)
+
+
+def test_frozen_renderer_before_send_is_client_error_and_browser_is_killed(chrome, monkeypatch):
+    page = chrome()
+    block = Blocking(page, "state")
+    kills = []
+    _arm(monkeypatch, kills, block)
+    with pytest.raises(ClientError, match="Chrome timed out after 0s") as ei:
+        run()
+    assert not isinstance(ei.value, SendUnconfirmedError)
+    assert kills == [mod.profile_dir()]
+    assert typed(chrome.log) == [] and chrome.log[-1] == "close"
+    with open(lock_path(), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_frozen_renderer_after_send_is_unconfirmed_with_url(chrome, monkeypatch):
+    page = chrome()
+    block = Blocking(page, "turnStatus")
+    kills = []
+    _arm(monkeypatch, kills, block)
+    with pytest.raises(SendUnconfirmedError, match="Chrome timed out") as ei:
+        run()
+    assert ei.value.conversation_url == URL
+    assert kills == [mod.profile_dir()]
+    with open(lock_path(), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_timer_is_cancelled_after_a_normal_call(chrome, monkeypatch):
+    kills = []
+    monkeypatch.setattr(mod, "_budget", lambda *a: 0.2)
+    monkeypatch.setattr(mod, "_kill_browser", lambda profile: kills.append(profile))
+    chrome()
+    run()
+    time.sleep(0.4)
+    assert kills == []
+
+
+def test_budget_matches_the_ego_formula():
+    assert mod._budget(100, "x" * 100, "text") == 100 + 120 + 6
+    assert mod._budget(100, "", "image") == 100 + 120 + 60
+
+
+def test_browser_pid_comes_from_the_profile_singleton_lock(tmp_path):
+    assert mod._browser_pid(tmp_path) is None
+    (tmp_path / "SingletonLock").symlink_to("my-host-name-4242")
+    assert mod._browser_pid(tmp_path) == 4242
+    (tmp_path / "SingletonLock").unlink()
+    (tmp_path / "SingletonLock").symlink_to("host-notapid")
+    assert mod._browser_pid(tmp_path) is None
+
+
+def test_kill_signals_only_the_profile_pid(monkeypatch, tmp_path):
+    (tmp_path / "SingletonLock").symlink_to("h-4242")
+    sent = []
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    _REAL_KILL(tmp_path)
+    assert sent == [(4242, mod.signal.SIGKILL)]
+    sent.clear()
+    _REAL_KILL(tmp_path / "other")
+    assert sent == []

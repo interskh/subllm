@@ -383,3 +383,17 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 
 **Touches**
 - `python/src/subllm/chatgpt_web.py`, tests `test_chatgpt_web_llm.py`, `test_cli_image.py`, `test_cli_chatgpt_web.py`, `README.md`, `docs/drivers-contract.md`.
+
+### Slice 4 gate fixes (cycle 1)
+
+**Decisions**
+- Overall limit: `threading.Timer` (daemon) armed after `_open_context` with `_budget()` (ego formula); on fire it sets `rec.dead`, records `Chrome timed out after Ns`, calls the `_kill_browser(profile)` seam. Cancelled in `finally`. `expired` goes to `classify` only when the flow did not return ok; the state loop re-raises once `rec.dead` (no 45 s spin on a dead browser).
+- Pid source: profile-scoped `SingletonLock` symlink `<host>-<pid>` (Chromium's process singleton; patchright itself checks that file in `isProfileLocked`). Chosen over CDP `SystemInfo.getProcessInfo` because a frozen renderer may not answer CDP. Not verified against a running Chrome (no launch). Windows has no SingletonLock (`lockfile`), so the kill is a no-op there.
+- `_chrome_executable()` mirrors patchright's channel list (darwin/linux fixed path, win32 env prefixes); `~/Applications` and PATH lookups removed. Reason now "Google Chrome is not installed at <path>; the subllm[chrome] driver needs it".
+- Challenge hand-off says "solve the challenge"; launch errors mention the profile only when the text matches profile/singleton/in use/existing browser session.
+- Conftest guard also patches `_kill_browser`.
+
+**Deferred**
+- Launch itself (`_open_context` enter) is not under the timer. Login helper ends when the first tab closes. Any flock OSError is treated as "lock held" and now affects both drivers.
+
+**Touches**: chrome.py, conftest.py, test_chatgpt_web_chrome.py, test_chatgpt_web_llm.py, README.md, docs/drivers-contract.md. Mutants: 8/8 caught (timer not armed, wrong pid, no signal, expired dropped, ~/Applications accepted, reason without extra, challenge text, profile message always).

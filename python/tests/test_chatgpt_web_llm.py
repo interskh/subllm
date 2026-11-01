@@ -167,7 +167,32 @@ def test_chrome_unavailable_names_the_extra(ego, chrome):
     assert "run_text" not in chrome.calls and not (ego.dir / "calls").exists()
 
 
+def _patchright_without_chrome(monkeypatch):
+    import types
+
+    from subllm.drivers.chatgpt_web import chrome as chrome_mod
+
+    pkg = types.ModuleType("patchright")
+    pkg.sync_api = types.ModuleType("patchright.sync_api")
+    monkeypatch.setitem(sys.modules, "patchright", pkg)
+    monkeypatch.setitem(sys.modules, "patchright.sync_api", pkg.sync_api)
+    monkeypatch.setattr(chrome_mod, "_chrome_executable", lambda: None)
+
+
 def test_chrome_not_installed_real_driver(ego, monkeypatch):
+    _patchright_without_chrome(monkeypatch)
+    with pytest.raises(ClientError, match=r"Google Chrome is not installed.*subllm\[chrome\]"):
+        ChatGPTWebLLM(browser="chrome").complete("q")
+    assert not (ego.dir / "calls").exists()
+
+
+def test_auto_both_unavailable_names_the_extra_when_chrome_is_missing(no_ego, monkeypatch):
+    _patchright_without_chrome(monkeypatch)
+    with pytest.raises(ClientError, match=r"no browser is available.*subllm\[chrome\]"):
+        ChatGPTWebLLM().complete("q")
+
+
+def test_chrome_patchright_not_installed_real_driver(ego, monkeypatch):
     monkeypatch.setitem(sys.modules, "patchright", None)
     monkeypatch.setitem(sys.modules, "patchright.sync_api", None)
     with pytest.raises(ClientError, match=r"subllm\[chrome\]"):

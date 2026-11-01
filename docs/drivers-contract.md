@@ -581,7 +581,13 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   `flock` as ego apply. On `human_action` the context is closed and a detached
   login helper opens a Chrome window on the profile; the call raises
   `HumanActionRequired(browser="chrome")` and the helper takes no lock. The guide
-  check is a no-op. Verified against offline fixtures only, not live.
+  check is a no-op. Chrome is found only at patchright's channel paths
+  (`/Applications/Google Chrome.app`, `/opt/google/chrome/chrome`, Windows
+  `Program Files`/`LOCALAPPDATA`). OVERALL LIMIT: a timer armed after launch uses ego's
+  budget formula; on expiry it SIGKILLs the browser pid read from the profile's
+  `SingletonLock` symlink (never by name), the blocked `evaluate` raises, and the
+  outcome goes through `classify` with `expired` (ClientError before the send,
+  SendUnconfirmedError after). Verified against offline fixtures only, not live.
 - ONE SEND PER CALL (D-6). Every call starts in a new chat (confirm no `/c/` in
   the URL before typing). No retry anywhere. Phases split at the first typed key
   (the keypress record, below) and at server acceptance: before it, failures are `ClientError`,
