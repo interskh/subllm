@@ -1020,3 +1020,73 @@ def test_restore_still_runs_after_the_menu_read(chrome):
     ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
     assert chrome.log.index(("press", "Escape")) < chrome.log.index(("press", "ArrowLeft"))
     assert page.calls.count("selectMode") == 5
+
+
+def _restore_hangs(block, calls):
+    def pick():
+        if calls:
+            return calls.pop(0)
+        block.entered.set()
+        if not block.release.wait(10):
+            raise AssertionError("the kill seam never ran (timer not armed)")
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    return pick
+
+
+def test_watchdog_during_restore_does_not_turn_a_downgrade_into_unconfirmed(chrome, monkeypatch):
+    block = type("B", (), {"release": threading.Event(), "entered": threading.Event()})()
+    page = chrome({"selectMode": _restore_hangs(block, [CLICK, DONE_PRO]), "auditModel": "downgrade", "servedModel": "GPT-6 Thinking"})
+    kills = []
+    _arm(monkeypatch, kills, block)
+    with pytest.raises(ModelDowngradeError) as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert type(ei.value) is ModelDowngradeError
+    assert (ei.value.text, ei.value.served_model) == ("hello", "GPT-6 Thinking")
+    assert kills == [mod.profile_dir()] and block.entered.is_set()
+
+
+def test_watchdog_during_the_flow_with_a_mode_is_still_unconfirmed(chrome, monkeypatch):
+    page = chrome({"selectMode": [DONE_PRO, DONE_MED], "auditModel": "ok"})
+    block = Blocking(page, "servedModel")
+    kills = []
+    _arm(monkeypatch, kills, block)
+    with pytest.raises(SendUnconfirmedError, match="Chrome timed out"):
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert kills == [mod.profile_dir()]
+
+
+def test_exception_mid_loop_after_a_key_press_still_restores(chrome):
+    picks = [CLICK, FOCUS, RIGHT, {"action": "click", "selector": "s", "current": "Pro"}] + RESTORE
+    page = chrome({"selectMode": picks})
+    state = {"thrown": False}
+    orig = page.click
+
+    def click(sel, **kw):
+        if not state["thrown"] and ("press", "ArrowRight") in chrome.log:
+            state["thrown"] = True
+            chrome.log.append(("click", sel))
+            raise RuntimeError("element detached")
+        return orig(sel, **kw)
+
+    page.click = click
+    with pytest.raises(ClientError, match="element detached"):
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert page.calls.count("selectMode") == 4 + 3 and ("press", "ArrowLeft") in chrome.log
+    assert ("press", "Enter") not in chrome.log and not [e for e in chrome.log if e[0:1] == ("type",)]
+
+
+@pytest.mark.parametrize(
+    "bad,needle",
+    [
+        ({**LOGGED_IN, "challenge": True}, "Cloudflare"),
+        ({**LOGGED_IN, "challenge": True, "logged_in": False}, "Cloudflare"),
+        ({**LOGGED_IN, "logged_in": False, "login_prompt": True}, "log in to chatgpt.com"),
+    ],
+)
+def test_post_selection_challenge_or_login_wall_is_human_action_with_login_helper(chrome, bad, needle):
+    chrome({"selectMode": [DONE_PRO, DONE_MED], "state": [LOGGED_IN, bad]})
+    with pytest.raises(HumanActionRequired) as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert needle in ei.value.detail and "close the window" in ei.value.detail
+    assert chrome.log[-2:] == ["close", "spawn"] and not typed(chrome.log)

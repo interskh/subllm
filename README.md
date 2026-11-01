@@ -247,7 +247,9 @@ llm = ChatGPTWebLLM(mode="pro", plan="pro")   # mode: default | thinking | pro
   match, the call fails closed with `ClientError` and nothing is sent. The legacy
   layout has no picker support, so a non-default mode fails closed there.
 - The choice persists in the browser and account, so the driver restores the
-  previous level afterwards (best effort; it never changes the call's result).
+  previous level afterwards (best effort; it never changes the call's result). The
+  restore is bounded to about 15 s in the ego driver, and a timeout that fires
+  during the restore in the Chrome driver does not affect the result either.
 - `timeout_s` defaults to 2700 s for `pro` and 600 s otherwise; an explicit value
   wins. The wait for the machine-wide lock uses the same value.
 - `ModelDowngradeError` is raised when a Pro run's page names a model that is not
@@ -258,6 +260,9 @@ llm = ChatGPTWebLLM(mode="pro", plan="pro")   # mode: default | thinking | pro
   `thinking` and `pro` the driver opens that menu with a real click (only when the
   button declares a menu), reads it, and closes it with Escape without choosing an
   item. Default mode does not, so its `served_model` is `None`.
+- A Pro image call whose served model is not a Pro model raises
+  `ModelDowngradeError` before the images are saved (the audit runs before the
+  fetch), so no image files are written.
 
 #### Choosing the browser
 

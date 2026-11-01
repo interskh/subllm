@@ -156,6 +156,8 @@ class _Rec:
     def __init__(self) -> None:
         self.sent = False
         self.dead = False
+        self.result_ready = False
+        self.gate = threading.Lock()
         self.url: str | None = None
         self.events: list[dict] = []
 
@@ -216,7 +218,7 @@ class ChromeDriver:
         budget = _budget(timeout_s, prompt, kind)
         expired: list[str] = []
 
-        gate = threading.Lock()
+        gate = rec.gate
         finished = False
 
         def _fire() -> None:
@@ -226,7 +228,8 @@ class ChromeDriver:
                 if finished:
                     return
                 rec.dead = True
-                expired.append(f"Chrome timed out after {budget:.0f}s")
+                if not rec.result_ready:
+                    expired.append(f"Chrome timed out after {budget:.0f}s")
                 with contextlib.suppress(Exception):
                     _kill_browser(profile)
 
@@ -277,12 +280,15 @@ class _Picker:
         self.page = page
         self.restore_to: str | None = None
 
-    def run(self, target: str) -> tuple[bool, str | None, str | None, str | None]:
+    def run(self, target: str, track: bool = False) -> tuple[bool, str | None, str | None, str | None]:
         first = None
         for _ in range(16):
             s = call_core(self.page, "selectMode", target)
             if first is None:
                 first = s.get("current")
+                # Recorded before any action so an exception mid-loop still restores the level.
+                if track and first and s.get("action") != "done":
+                    self.restore_to = first
             action = s.get("action")
             if action == "done":
                 return True, first, s.get("selected_label"), None
@@ -310,6 +316,9 @@ def _flow(ctx, prompt: str, timeout_s: float, kind: str, tmpdir: Path, rec: _Rec
     try:
         return _flow_steps(page, picker, prompt, timeout_s, kind, tmpdir, rec, mode)
     finally:
+        # the result is decided; a watchdog expiry from here on only frees a hung restore
+        with rec.gate:
+            rec.result_ready = True
         if picker.restore_to and not rec.dead:
             picker.restore()
 
@@ -359,12 +368,16 @@ def _flow_steps(page, picker: _Picker, prompt: str, timeout_s: float, kind: str,
         raise _Stop("client", "not a new chat")
 
     if mode != "default":
-        ok, first, label, detail = picker.run(mode)
-        if first and (not ok or first != label):
-            picker.restore_to = first
+        ok, first, label, detail = picker.run(mode, track=True)
+        if ok and first == label:
+            picker.restore_to = None
         if not ok:
             raise _Stop("client", f"mode selection failed: {detail}" if detail else "mode selection unconfirmed")
         after = core("state")
+        if after.get("challenge"):
+            raise _Stop("human_action", "Cloudflare challenge")
+        if not after.get("logged_in") and after.get("login_prompt"):
+            raise _Stop("human_action", "log in to chatgpt.com in Chrome")
         if after.get("quota"):
             raise _Stop("quota", "usage limit reached")
         if not after.get("logged_in") or after.get("mode_surface") != "chat" or after.get("busy"):

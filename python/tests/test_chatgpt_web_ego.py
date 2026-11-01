@@ -837,14 +837,20 @@ const __st = { i: 0 };
 const __typed = { done: false };
 const __next = (list, ix) => { const v = list[Math.min(ix.i, list.length - 1)]; ix.i += 1; return v; };
 let __t = Date.now(); Date.now = () => (__t += 1000);
-const __timer = setTimeout; globalThis.setTimeout = (f) => __timer(f, 0);
+const __timer = setTimeout; globalThis.setTimeout = (f, ms) => __timer(f, ms >= 10000 ? 300 : 0);
 process.on('exit', () => console.log('ACT_LOG ' + JSON.stringify(__log)));
 const __page = {
   url: async () => (__typed.done ? "https://chatgpt.com/c/fake-id" : "https://chatgpt.com/"),
   goto: async () => {},
   cdp: async () => {},
   fetch: async (src) => { __log.push("fetch " + src); return { ok: true }; },
-  click: async (sel) => { __log.push("click " + sel); },
+  click: async (sel) => {
+    __log.push("click " + sel);
+    if (__cfg.click_throws_after_key && !__cfg.thrown && __log.some((l) => l.startsWith("press "))) {
+      __cfg.thrown = true;
+      throw new Error("CLICK_BOOM");
+    }
+  },
   focus: async (sel) => { __log.push("focus " + sel); },
   keyboard: {
     type: async () => { __log.push("type"); },
@@ -858,6 +864,7 @@ const __page = {
       __log.push("selectMode " + JSON.parse(call.slice(call.indexOf(".selectMode(") + 12, -1)));
       const v = __next(__cfg.picks, __pick);
       if (v.throw) throw new Error(v.throw);
+      if (v.hang) return new Promise(() => {});
       return v;
     }
     if (call.includes(").auditModel(")) { __log.push("auditModel"); return __cfg.audit; }
@@ -894,13 +901,13 @@ _PRO_PATH = [_CLICK, _FOCUS, _RIGHT, _RIGHT, _RIGHT, _RIGHT, _ESC, _DONE_PRO]
 _RESTORE_PATH = [_act("Pro", action="click", selector="button[aria-label='Select ChatGPT model']"), _act("Pro", action="key", key="ArrowLeft"), _DONE_MED]
 
 
-def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text", menu=None, served_throws=False):
+def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text", menu=None, served_throws=False, click_throws_after_key=False):
     kp = tmp_path / "keypress"
     body = build_script(
         "hi", space="subllm-chatgpt-abcd1234", timeout_ms=600000, keypress_file=str(kp), mode=mode,
         **({"kind": "image", "image_dir": "/img/dir"} if kind == "image" else {}),
     )
-    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "menu": menu, "served_throws": served_throws, "images": ["blob:a"] if kind == "image" else []}
+    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "menu": menu, "served_throws": served_throws, "click_throws_after_key": click_throws_after_key, "images": ["blob:a"] if kind == "image" else []}
     runtime = _MODE_RUNTIME.replace("%CFG%", json.dumps(cfg))
     prog = tmp_path / "run.js"
     prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
@@ -1098,3 +1105,36 @@ def test_restore_still_runs_after_the_menu_read(tmp_path):
     assert results[0]["ok"] is True
     assert log.index("press Escape", log.index(_MENU_CLICK)) < log.index("selectMode Medium")
     assert log[-1] == "finish"
+
+
+@needs_node
+def test_hung_restore_is_bounded_and_keeps_the_ok_result(tmp_path):
+    kp, log, results, out = _run_mode(
+        tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO, {"hang": True}]
+    )
+    assert len(results) == 1 and results[0]["ok"] is True
+    assert "picker restore failed: picker restore timed out" in out
+    assert log[-1] == "finish"
+
+
+@needs_node
+def test_throw_mid_loop_after_a_key_press_still_restores_to_the_first_current(tmp_path):
+    picks = [_CLICK, _FOCUS, _RIGHT, _act("Pro", action="click", selector="s")] + _RESTORE_PATH
+    kp, log, results, _ = _run_mode(tmp_path, picks, click_throws_after_key=True)
+    assert results[0]["kind"] == "client" and "CLICK_BOOM" in results[0]["detail"]
+    assert not kp.exists()
+    assert _targets(log) == ["selectMode pro"] * 4 + ["selectMode Medium"] * 3
+    assert log[-1] == "finish"
+
+
+@needs_node
+def test_post_selection_challenge_or_login_wall_is_a_human_action(tmp_path):
+    for bad, detail in (
+        ({**_CHAT, "challenge": True}, "Cloudflare challenge"),
+        ({**_CHAT, "challenge": True, "logged_in": False}, "Cloudflare challenge"),
+        ({**_CHAT, "logged_in": False, "login_prompt": True}, "log in to chatgpt.com in ego lite"),
+    ):
+        kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO, _DONE_MED], states=[_CHAT, bad])
+        assert not kp.exists() and "type" not in log
+        assert (results[0]["kind"], results[0]["detail"]) == ("human_action", detail)
+        assert "handoff" in log

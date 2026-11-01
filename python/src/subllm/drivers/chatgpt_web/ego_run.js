@@ -25,14 +25,21 @@ let core = null;
 let outcome = "error";
 let conversationUrl = null;
 let restoreTo = null;
+let pickerAbort = false;
+const RESTORE_BOUND_MS = 15000;
 const MODE = ARGS.mode || "default";
 
 // Drives the page_core selectMode planner with real input: click/focus/key, bounded.
-const runPicker = async (target) => {
+const runPicker = async (target, track) => {
   let first = null;
   for (let i = 0; i < 16; i++) {
+    if (pickerAbort) return { ok: false, first, detail: "restore timed out" };
     const s = await core("selectMode", target);
-    if (first === null) first = s.current;
+    if (first === null) {
+      first = s.current;
+      // Recorded before any action so a throw mid-loop still restores the level.
+      if (track && first && s.action !== "done") restoreTo = first;
+    }
     if (s.action === "done") return { ok: true, first, label: s.selected_label };
     if (s.action === "fail") return { ok: false, first, detail: s.detail };
     if (s.action === "click") await page.click(s.selector, { label: "open model picker" });
@@ -81,10 +88,12 @@ try {
   if (await isChat()) stop("client", "not a new chat");
 
   if (MODE !== "default") {
-    const sel = await runPicker(MODE);
-    if (sel.first && (!sel.ok || sel.first !== sel.label)) restoreTo = sel.first;
+    const sel = await runPicker(MODE, true);
+    if (sel.ok && sel.first === sel.label) restoreTo = null;
     if (!sel.ok) stop("client", sel.detail ? "mode selection failed: " + sel.detail : "mode selection unconfirmed");
     const after = await core("state");
+    if (after.challenge) stop("human_action", "Cloudflare challenge");
+    if (!after.logged_in && after.login_prompt) stop("human_action", "log in to chatgpt.com in ego lite");
     if (after.quota) stop("quota", "usage limit reached");
     if (!after.logged_in || after.mode_surface !== "chat" || after.busy) {
       stop("client", "Chat mode not confirmed after mode selection");
@@ -226,11 +235,17 @@ try {
   }
 } finally {
   if (restoreTo && outcome !== "human_action" && page) {
+    let timer = null;
     try {
-      const back = await runPicker(restoreTo);
+      const bound = new Promise((r) => {
+        timer = setTimeout(() => { pickerAbort = true; r({ ok: false, detail: "picker restore timed out" }); }, RESTORE_BOUND_MS);
+      });
+      const back = await Promise.race([runPicker(restoreTo, false), bound]);
       if (!back.ok) console.log("picker restore failed: " + (back.detail || "unconfirmed"));
     } catch (e) {
       console.log("picker restore failed: " + String((e && e.message) || e));
+    } finally {
+      clearTimeout(timer);
     }
   }
   try {

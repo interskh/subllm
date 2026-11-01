@@ -696,9 +696,13 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   `served_model: null`.
 - MODE RESTORE. The first `current` seen by the picker is the restore target; it is
   set when it differs from the selected label or the selection failed (so an opened
-  menu is closed again). After the outcome, the same bounded loop selects it back.
-  Restore is best effort: errors are swallowed, it never changes the result, and it
-  is skipped for `human_action` (ego) and when the Chrome call was killed by its
-  limit. The choice persists in the browser/account, which is why it is restored.
+  menu is closed again). The target is recorded from the first planner step, before
+  any action, so a throw mid-loop still restores. After the outcome, the same bounded
+  loop selects it back. Restore is best effort: errors are swallowed, it never changes
+  the result, and it is skipped for `human_action` (ego) and when the Chrome call was
+  killed by its limit before the result was decided. The ego restore is bounded to
+  about 15 s (`picker restore timed out` is logged and the script finishes). A Chrome
+  watchdog expiry that fires during the restore, after the flow's result is decided,
+  may still kill the browser but is not used to classify that result. The choice persists in the browser/account, which is why it is restored.
 - TIMEOUT. `timeout_s` defaults to 2700 s for `mode="pro"` and 600 s otherwise (the
   flock wait uses the same value).

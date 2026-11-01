@@ -507,3 +507,21 @@ implement-loop: slice 4 shipped d96d7eb; remaining: [5]
 - Served-model label after completion: none in the turn DOM (no model attribute, no model text). The only label is the first item of the answer's "Try again" menu (Regenerate button, `aria-haspopup="menu"`): "Try again • 6 Pro". Opening the menu and pressing Escape did not regenerate. This run predates the T3 menu read, so its served_model was None (unverified).
 - Live call 2, the optional thinking turn (Python API `ChatGPTWebLLM(mode="thinking").complete_result`, to see served_model): ok in 18 s, format markdown, served_model "6 Thinking" read through the T3 menu path, server-id conversation URL. Selection was the no-change path (picker already at Medium). Home picker still Medium afterwards; tripwire log empty.
 - Not verified live: the T3 menu read on a Pro turn (fixture from the live Pro capture covers it), any picker change on Chrome, a real downgrade.
+
+### Slice 5 gate fixes (cycle 1)
+
+**Decisions**
+- Ego restore bounded by `Promise.race` against a 15 s timer (`RESTORE_BOUND_MS`); on timeout it sets `pickerAbort` (checked per picker step, so a late-waking loop does no more input), logs `picker restore failed: picker restore timed out`, then finishes. 16-step bound kept.
+- Chrome: `_Rec.result_ready` set in `_flow`'s `finally` under `rec.gate` (the same lock `_fire` holds, now owned by `_Rec`), before restore. `_fire` still sets `dead` and kills, but appends `expired` only if the result was not ready, so a downgrade stays `ModelDowngradeError`. Flow-time hangs map as before.
+- Restore target is recorded on the first planner step when it is not `done` (`runPicker/_Picker.run(target, track)`), before any action; after a successful run with `first == label` it is cleared. Restore calls use `track=False`.
+- Post-selection state mirrors the pre-send check: challenge -> `human_action`, logged-out with login prompt -> `human_action`, quota -> `quota`, else `client`. Chrome's existing spawn-login path applies since `rec.sent` is false.
+- Test harness: the ego fake `setTimeout` now maps delays >= 10 s to 300 ms (others stay 0) so the bound is testable.
+
+**Rejected**
+- Setting `result_ready` only from `_run_locked` after `_flow` returns: restore runs inside `_flow`, too late.
+
+**Deferred**
+- Chrome restore failure is silent (no log channel).
+- Ego `human_action` after a changed picker level skips restore (existing behavior; the user takes over the page).
+
+**Touches**: `drivers/chatgpt_web/{ego_run.js,chrome.py}`, tests `test_chatgpt_web_{ego,chrome}.py`, README, drivers-contract. page_core unchanged. Mutants 7/7 caught.
