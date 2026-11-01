@@ -561,10 +561,27 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   and named `subllm-chatgpt-<8 hex>`. The script calls `finish({keep: []})` on
   every outcome except `human_action`, where it calls `handOff()` and leaves the
   space open.
-- DETECTION (D-4). `ego-browser` on PATH, `ego-browser --version` exits 0, a
+- DETECTION (D-4, D-5). `ego-browser` on PATH, `ego-browser --version` exits 0, a
   no-browser health script round-trips a sentinel. Then `ego-browser skill` must
   report usage guide major `2`; any other major is a `ClientError` naming both
-  versions, never a fallback, even under `browser="auto"`.
+  versions, never a fallback, even under `browser="auto"`. Under `auto`, a failed
+  ego ladder (before the guide check) falls back to the Chrome driver; if Chrome
+  is also unavailable the `ClientError` names both reasons. `browser="ego"` and
+  `browser="chrome"` never fall back. The choice is made once at resolution,
+  before any send; an error from the resolved driver is never retried on the
+  other one.
+- CHROME SUBSTRATE (D-5, optional extra `subllm[chrome]`). patchright persistent
+  context, channel `chrome`, headful, on the owned profile
+  `~/.local/share/subllm/chrome-profile`. Page-core reads run in the isolated
+  world (stealth); only `captureText` (the page's Copy handler) and the image
+  `fetch` run in the main world. Image bytes come back as base64 from an in-page
+  `fetch` bounded at 30 s, are written to the per-call temp dir, and then go
+  through the same IMAGE SAVE path. The keypress record is in-process (`sent` is
+  set before the first key event). The same `classify` mapping and the same
+  `flock` as ego apply. On `human_action` the context is closed and a detached
+  login helper opens a Chrome window on the profile; the call raises
+  `HumanActionRequired(browser="chrome")` and the helper takes no lock. The guide
+  check is a no-op. Verified against offline fixtures only, not live.
 - ONE SEND PER CALL (D-6). Every call starts in a new chat (confirm no `/c/` in
   the URL before typing). No retry anywhere. Phases split at the first typed key
   (the keypress record, below) and at server acceptance: before it, failures are `ClientError`,

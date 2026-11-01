@@ -7,6 +7,7 @@ from typing import Any
 from subllm._images import prepare_out_dir
 from subllm.base import BaseLLM, ImageGenerator, ImageResult, WebTextResult
 from subllm.codex import _JSON_INSTRUCTION, _parse_json_object
+from subllm.drivers.chatgpt_web.chrome import ChromeDriver
 from subllm.drivers.chatgpt_web.ego import EgoDriver, normalize_prompt
 from subllm.errors import ClientError, OutputError
 from subllm.preflight import RegionGuard
@@ -39,21 +40,30 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
         self._browser = browser
         self._guard = region_guard
         self._timeout_s = _DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
-        self._driver: EgoDriver | None = None
+        self._driver: EgoDriver | ChromeDriver | None = None
 
-    def _resolve_driver(self) -> EgoDriver:
+    def _resolve_driver(self) -> EgoDriver | ChromeDriver:
         if self._driver is not None:
             return self._driver
+        driver: EgoDriver | ChromeDriver
         if self._browser == "chrome":
-            raise ClientError("the Chrome driver is not available yet")
-        driver = EgoDriver()
-        ok, reason = driver.available()
-        if not ok:
-            if self._browser == "ego":
-                raise ClientError(f"ego lite is not available: {reason}")
-            raise ClientError(
-                f"ego lite is not available: {reason}; the Chrome fallback is not available yet"
-            )
+            driver = ChromeDriver()
+            ok, reason = driver.available()
+            if not ok:
+                raise ClientError(f"Chrome is not available: {reason}")
+        else:
+            driver = EgoDriver()
+            ok, reason = driver.available()
+            if not ok:
+                if self._browser == "ego":
+                    raise ClientError(f"ego lite is not available: {reason}")
+                driver = ChromeDriver()
+                chrome_ok, chrome_reason = driver.available()
+                if not chrome_ok:
+                    raise ClientError(
+                        f"no browser is available: ego lite is not available: {reason}; "
+                        f"Chrome is not available: {chrome_reason}"
+                    )
         self._driver = driver
         return driver
 

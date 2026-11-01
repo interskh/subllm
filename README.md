@@ -175,10 +175,10 @@ raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
 `CodexLLM` implements the `ImageGenerator` interface.
 
-### ChatGPT web route (ego lite)
+### ChatGPT web route (ego lite or Chrome)
 
 `ChatGPTWebLLM` sends a prompt through the official chatgpt.com web app, open in
-a real, logged-in ego lite browser. It spends **Chat** quota only. It is opt-in:
+a real, logged-in browser: ego lite, or Google Chrome as a fallback. It spends **Chat** quota only. It is opt-in:
 nothing else in subllm uses it, and `FallbackLLM` only reaches it if you list it.
 Browser automation of the web app carries account risk (spec A-1); use an
 account you can afford to put at risk.
@@ -201,9 +201,37 @@ print(res.format, res.served_model, res.conversation_url)  # https://chatgpt.com
 data = llm.complete_json("Return {...}")    # dict, prompt-instructed JSON
 ```
 
-Only `mode="default"` is available; the Chrome driver is not available yet, so
-`browser="auto"` currently means ego lite. A call makes exactly one send and never
-retries; calls are serialized per machine by a file lock.
+Only `mode="default"` is available. A call makes exactly one send and never
+retries; calls are serialized per machine by a file lock (shared by both
+browsers).
+
+#### Choosing the browser
+
+- `browser="auto"` (default): ego lite when its detection passes, else Chrome. If
+  neither is available, `ClientError` names both reasons.
+- `browser="ego"` / `browser="chrome"`: force one browser; there is no fallback.
+- The choice is made once, before anything is typed. An ego guide-major mismatch
+  is an error, never a fallback. After the first key, or after any error from the
+  chosen browser, no second browser is tried.
+
+#### Chrome driver
+
+Install the extra and Google Chrome:
+
+```bash
+pip install 'subllm[chrome]'     # or, in a checkout: uv sync --extra chrome
+```
+
+Google Chrome must be installed. The driver uses patchright with channel
+`chrome`, so no Chromium is downloaded. It runs headful on a subllm-owned
+profile at `~/.local/share/subllm/chrome-profile`, not your daily profile.
+
+One-time login: on first use, or when chatgpt.com shows a login wall, a Chrome
+window opens on that profile and `HumanActionRequired` is raised (CLI exit 3).
+Log in, close the window, and retry. Calls fail while that window is open.
+
+The Chrome path to chatgpt.com has **not been verified live**: it is covered by
+offline fixture tests only (`SUBLLM_BROWSER=1`, see Testing).
 
 #### Image generation (web route)
 
@@ -387,8 +415,8 @@ exit code. Example:
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
 
-`--browser chrome` is accepted but fails with `ClientError` until the Chrome
-driver lands. With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
+`--browser chrome` needs `subllm[chrome]` and Google Chrome (see "Chrome
+driver"); a Chrome login request exits 3 like ego. With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
 `--browser` is rejected for the other clients. Errors print
 `error: <Type>: <message>` to stderr and exit 1; `HumanActionRequired` exits 3
 so a wrapper can prompt the user to log in.
@@ -447,7 +475,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (503 passed, 44 skipped)
+uv run pytest                 # no subscription, no network (574 passed, 77 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -469,6 +497,15 @@ SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # ego li
 
 Requires `codex` logged in to a ChatGPT plan; the claude tests additionally need
 `claude` (logged in to Pro/Max) and `tmux`.
+
+Opt-in **browser fixture tests** load DOM fixtures into a real ego lite page and
+headless Chrome with the network blocked (they never reach chatgpt.com). Each
+test runs on whichever browser is present; the Chrome half needs the extra and
+Google Chrome:
+
+```bash
+SUBLLM_BROWSER=1 uv run --extra chrome pytest -m browser
+```
 
 A second opt-in live suite covers **web-agent mode** — per client, a grounded
 browsing turn (G1) and a negative control (G3) that tries to read a canary file,

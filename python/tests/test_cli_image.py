@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from subllm.cli import main
+from subllm.errors import HumanActionRequired
 
 from .test_chatgpt_web_ego import PNG_BYTES, URL, ev, fail, img_ok
-from .test_chatgpt_web_llm import egoimg  # noqa: F401
+from .test_chatgpt_web_llm import chrome, egoimg  # noqa: F401
 
 _WRITE = r'''
 mkdir -p "$CODEX_HOME/generated_images/t1"
@@ -128,11 +129,20 @@ def test_web_browser_flag_accepted(egoimg, capsys):
     assert json.loads(capsys.readouterr().out)["route"] == "web"
 
 
-def test_web_browser_flag_reaches_client(egoimg, capsys):
+def test_web_browser_flag_reaches_client(egoimg, chrome, capsys):
     d, out = egoimg
-    assert _web(out, "--browser", "chrome") == 1
+    assert _web(out, "--browser", "chrome") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["text"] == "chrome" and chrome.calls[-1] == "run_image"
+    assert not (d / "calls").exists()
+
+
+def test_web_chrome_human_action_exits_3(egoimg, chrome, capsys):
+    d, out = egoimg
+    chrome.run_error = HumanActionRequired("log in", browser="chrome")
+    assert _web(out, "--browser", "chrome") == 3
     cap = capsys.readouterr()
-    assert cap.out == "" and cap.err.startswith("error: ClientError:")
+    assert cap.out == "" and cap.err.startswith("error: HumanActionRequired:")
 
 
 def test_web_prompt_from_stdin(egoimg, capsys, monkeypatch):

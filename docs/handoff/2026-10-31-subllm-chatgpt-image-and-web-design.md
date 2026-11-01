@@ -361,3 +361,25 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 **Touches**
 - `python/tests/test_chatgpt_web_core.py`, `python/pyproject.toml` (marker text only). Test count with SUBLLM_BROWSER=1: 64 (31 ego, 33 chrome).
 - Mutants: call_core isolated -> caught by the new test (1/1); `_FETCH_JS` slice off by one -> caught by the image test (1/1). chrome.py restored (sha verified, git diff empty).
+
+### T3 — browser=auto fallback, docs
+
+**Decisions**
+- `_resolve_driver`: chrome -> ChromeDriver only ("Chrome is not available: <reason>"); ego -> unchanged message; auto -> ego ladder, else ChromeDriver, both-fail message "no browser is available: ego lite is not available: <r>; Chrome is not available: <r>". Fallback decided only here; `check_guide()` and runs stay in `complete_result`/`generate_image` outside resolution, so a v3 guide or a run error never reaches Chrome.
+- Importing `ChromeDriver` at module top is safe: chrome.py imports patchright lazily (checked with `sys.modules["patchright"]=None`).
+- cli.py needed no change: `_report_web_error` is browser-agnostic (exit 3 for any HumanActionRequired); docstring still right.
+- Tests: `FakeChrome` + `chrome` fixture in test_chatgpt_web_llm.py (imported by the two CLI test files); `test_ego_missing` now ego-only (auto + missing ego now selects the real ChromeDriver, which the conftest guard blocks).
+- Full hermetic run: 574 passed, 77 skipped. Mutants 5/5 caught (a guide-mismatch fallback, b auto always Chrome, c auto never falls back, d drop Chrome reason, e retry Chrome after ego error).
+
+**Rejected**
+- Keeping `test_ego_missing[auto]`: it would launch the real fallback (guard fails it); replaced by fake-based fallback tests.
+- Running `SUBLLM_BROWSER=1 ... -m browser` in this task (test hygiene forbids it); the command was only collected (`--extra chrome -m browser`: 64 tests). T2 ran it.
+
+**Assumptions**
+- The README browser command works as in T2's run; Chrome login flow / helper text describes chrome.py as read, never run live.
+
+**Deferred**
+- Live Chrome verification (user decision); stated plainly in README and drivers-contract.
+
+**Touches**
+- `python/src/subllm/chatgpt_web.py`, tests `test_chatgpt_web_llm.py`, `test_cli_image.py`, `test_cli_chatgpt_web.py`, `README.md`, `docs/drivers-contract.md`.

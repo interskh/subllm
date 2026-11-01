@@ -1,11 +1,20 @@
 import json
 import os
+import sys
 
 import pytest
 
 from subllm import ChatGPTWebLLM, RegionGuard, WebTextResult
 from subllm.base import ImageGenerator, ImageResult
-from subllm.errors import ClientError, OutputError, QuotaError, RegionError
+from subllm import chatgpt_web as cw
+from subllm.errors import (
+    ClientError,
+    HumanActionRequired,
+    OutputError,
+    QuotaError,
+    RegionError,
+    SendUnconfirmedError,
+)
 
 from .test_chatgpt_web_ego import IMG_STUB, OK, PNG_BYTES, STUB, URL, ev, fail, img_ok, res
 
@@ -93,25 +102,190 @@ def test_region_guard_runs_before_any_ego_call(ego):
     assert not (ego.dir / "script.js").exists()
 
 
-def test_chrome_not_available(ego):
-    with pytest.raises(ClientError, match="Chrome"):
+CHROME_MISSING = "patchright is not installed (pip install 'subllm[chrome]')"
+
+
+class FakeChrome:
+    """Replaces ChromeDriver in subllm.chatgpt_web; records every call."""
+
+    ok = True
+    reason = CHROME_MISSING
+    run_error: Exception | None = None
+    calls: list = []
+
+    def __init__(self):
+        FakeChrome.calls.append("init")
+
+    def available(self):
+        FakeChrome.calls.append("available")
+        return (True, "ok") if FakeChrome.ok else (False, FakeChrome.reason)
+
+    def check_guide(self):
+        FakeChrome.calls.append("check_guide")
+
+    def run_text(self, prompt, *, timeout_s):
+        FakeChrome.calls.append("run_text")
+        if FakeChrome.run_error:
+            raise FakeChrome.run_error
+        return WebTextResult(text="from chrome", format="plain", served_model=None, conversation_url=URL)
+
+    def run_image(self, prompt, dest, *, timeout_s):
+        FakeChrome.calls.append("run_image")
+        if FakeChrome.run_error:
+            raise FakeChrome.run_error
+        p = dest / "chrome-1.png"
+        p.write_bytes(PNG_BYTES)
+        return ImageResult(paths=[p], route="web", text="chrome", conversation_url=URL, served_model=None)
+
+
+@pytest.fixture
+def chrome(monkeypatch):
+    FakeChrome.ok = True
+    FakeChrome.reason = CHROME_MISSING
+    FakeChrome.run_error = None
+    FakeChrome.calls = []
+    monkeypatch.setattr(cw, "ChromeDriver", FakeChrome)
+    return FakeChrome
+
+
+@pytest.fixture
+def no_ego(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+
+def test_chrome_only_uses_chrome_and_never_ego(ego, chrome):
+    assert ChatGPTWebLLM(browser="chrome").complete("q") == "from chrome"
+    assert chrome.calls == ["init", "available", "check_guide", "run_text"]
+    assert not (ego.dir / "calls").exists()
+
+
+def test_chrome_unavailable_names_the_extra(ego, chrome):
+    chrome.ok = False
+    with pytest.raises(ClientError, match=r"subllm\[chrome\]"):
+        ChatGPTWebLLM(browser="chrome").complete("q")
+    assert "run_text" not in chrome.calls and not (ego.dir / "calls").exists()
+
+
+def test_chrome_not_installed_real_driver(ego, monkeypatch):
+    monkeypatch.setitem(sys.modules, "patchright", None)
+    monkeypatch.setitem(sys.modules, "patchright.sync_api", None)
+    with pytest.raises(ClientError, match=r"subllm\[chrome\]"):
         ChatGPTWebLLM(browser="chrome").complete("q")
     assert not (ego.dir / "calls").exists()
 
 
-@pytest.mark.parametrize("browser", ["auto", "ego"])
-def test_ego_missing(browser, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PATH", str(tmp_path))
+def test_auto_ego_passes_chrome_untouched(ego, chrome):
+    assert ChatGPTWebLLM(browser="auto").complete("q") == "hello"
+    assert chrome.calls == []
+
+
+def test_ego_missing(no_ego):
     with pytest.raises(ClientError, match="not on PATH"):
-        ChatGPTWebLLM(browser=browser).complete("q")
+        ChatGPTWebLLM(browser="ego").complete("q")
 
 
-def test_auto_missing_mentions_chrome_fallback(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PATH", str(tmp_path))
-    with pytest.raises(ClientError, match="Chrome fallback"):
+def test_ego_forced_never_falls_back(no_ego, chrome):
+    with pytest.raises(ClientError, match="ego lite is not available"):
+        ChatGPTWebLLM(browser="ego").complete("q")
+    assert chrome.calls == []
+
+
+def test_auto_ego_missing_falls_back_to_chrome_text(no_ego, chrome):
+    llm = ChatGPTWebLLM()
+    assert llm.complete("q") == "from chrome"
+    assert llm.complete("q") == "from chrome"
+    assert chrome.calls == ["init", "available", "check_guide", "run_text", "check_guide", "run_text"]
+
+
+def test_auto_ego_missing_falls_back_to_chrome_image(no_ego, chrome, tmp_path):
+    r = ChatGPTWebLLM().generate_image("a cube", tmp_path / "out")
+    assert r.text == "chrome" and r.paths[0].read_bytes() == PNG_BYTES
+    assert "run_image" in chrome.calls
+
+
+def test_auto_both_unavailable_names_both_reasons(no_ego, chrome):
+    chrome.ok = False
+    with pytest.raises(ClientError) as ei:
         ChatGPTWebLLM().complete("q")
+    msg = str(ei.value)
+    assert "not on PATH" in msg and "subllm[chrome]" in msg
+    assert "run_text" not in chrome.calls
+
+
+def test_auto_both_unavailable_chrome_not_installed(no_ego, monkeypatch):
+    monkeypatch.setitem(sys.modules, "patchright", None)
+    monkeypatch.setitem(sys.modules, "patchright.sync_api", None)
+    with pytest.raises(ClientError, match=r"not on PATH.*subllm\[chrome\]"):
+        ChatGPTWebLLM().complete("q")
+
+
+def test_failed_resolution_is_not_cached(no_ego, chrome):
+    chrome.ok = False
+    llm = ChatGPTWebLLM()
+    with pytest.raises(ClientError):
+        llm.complete("q")
+    chrome.ok = True
+    assert llm.complete("q") == "from chrome"
+
+
+def test_auto_guide_v3_is_an_error_not_a_chrome_fallback(ego, chrome, monkeypatch):
+    monkeypatch.setenv("STUB_GUIDE", "v3.0.0")
+    with pytest.raises(ClientError, match="supported"):
+        ChatGPTWebLLM(browser="auto").complete("q")
+    assert chrome.calls == []
+
+
+@pytest.mark.parametrize("scenario", ["client", "quota", "human", "unconfirmed"])
+def test_auto_ego_run_error_propagates_without_a_second_driver(ego, chrome, scenario):
+    if scenario == "client":
+        ego(fail("client", "bad"), keypress=False, code=1)
+        exc = ClientError
+    elif scenario == "quota":
+        ego(fail("quota"), keypress=False, code=1)
+        exc = QuotaError
+    elif scenario == "human":
+        ego(fail("human_action", "log in"), keypress=False, code=1)
+        exc = HumanActionRequired
+    else:
+        ego(ev(phase="accepted", conversation_url=URL), keypress=True, code=1)
+        exc = SendUnconfirmedError
+    with pytest.raises(exc):
+        ChatGPTWebLLM(browser="auto").complete("q")
+    assert chrome.calls == []
+
+
+def test_auto_ego_image_error_does_not_try_chrome(egoimg, chrome, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", fail("quota"))
+    monkeypatch.setenv("STUB_KEYPRESS", "0")
+    monkeypatch.setenv("STUB_CODE", "1")
+    with pytest.raises(QuotaError):
+        ChatGPTWebLLM().generate_image("x", out)
+    assert chrome.calls == []
+
+
+@pytest.mark.parametrize("err", [ClientError("x"), QuotaError("x"), SendUnconfirmedError("x")])
+def test_chrome_run_error_propagates_after_fallback(no_ego, chrome, err):
+    chrome.run_error = err
+    with pytest.raises(type(err)):
+        ChatGPTWebLLM().complete("q")
+    assert chrome.calls.count("run_text") == 1
+
+
+def test_image_bad_out_dir_precedes_driver_resolution(no_ego, chrome, tmp_path):
+    f = tmp_path / "file"
+    f.write_text("x")
+    with pytest.raises(ClientError, match="out_dir"):
+        ChatGPTWebLLM().generate_image("x", f)
+    assert chrome.calls == []
+
+
+def test_region_guard_precedes_fallback_detection(no_ego, chrome):
+    guard = RegionGuard(allowed_regions={"US"}, lookup=lambda: "XX")
+    with pytest.raises(RegionError):
+        ChatGPTWebLLM(region_guard=guard).complete("q")
+    assert chrome.calls == []
 
 
 @pytest.mark.parametrize(

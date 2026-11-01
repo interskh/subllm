@@ -5,7 +5,9 @@ import pytest
 from subllm.cli import main
 
 from .test_chatgpt_web_ego import URL, ev, fail
-from .test_chatgpt_web_llm import _ok, ego  # noqa: F401
+from subllm.errors import HumanActionRequired
+
+from .test_chatgpt_web_llm import _ok, chrome, ego  # noqa: F401
 
 
 def test_complete_prints_text(ego, capsys):
@@ -65,3 +67,15 @@ def test_codex_default_effort_is_medium(monkeypatch, capsys):
     assert seen["effort"] == "medium"
     assert main(["complete", "--client", "codex", "--effort", "high", "hi"]) == 0
     assert seen["effort"] == "high"
+
+
+def test_chrome_browser_prints_text(ego, chrome, capsys):
+    assert main(["complete", "--client", "chatgpt-web", "--browser", "chrome", "hi"]) == 0
+    assert capsys.readouterr().out == "from chrome\n"
+    assert not (ego.dir / "calls").exists()
+
+
+def test_chrome_human_action_exits_3(ego, chrome, capsys):
+    chrome.run_error = HumanActionRequired("log in", browser="chrome")
+    assert main(["complete", "--client", "chatgpt-web", "--browser", "chrome", "hi"]) == 3
+    assert capsys.readouterr().err.startswith("error: HumanActionRequired:")
