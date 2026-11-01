@@ -11,7 +11,7 @@ can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one wit
 no call-site changes.
 
 **Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), plus an
-opt-in ChatGPT web route for text and images (`ChatGPTWebLLM`). 503 hermetic tests passing,
+opt-in ChatGPT web route for text and images (`ChatGPTWebLLM`). 665 hermetic tests passing,
 plus an opt-in live suite — the codex and claude paths verified end-to-end against
 live subscriptions.
 
@@ -175,6 +175,33 @@ raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
 `CodexLLM` implements the `ImageGenerator` interface.
 
+### Choosing a route
+
+| | Codex route | Web route |
+|---|---|---|
+| Client | genuine `codex exec` | chatgpt.com in a real logged-in browser |
+| Quota | Codex/Work | Chat only |
+| Images | `image_gen`, about 1536x1024 | the page's rendered size (1254x1254 observed), slower |
+| Modes | none | `thinking`, `pro` (needs `plan="pro"`) |
+| Concurrency | none enforced | one call at a time per machine (file lock) |
+| History | no chat history | regular chats: history, memory and custom instructions apply |
+| Account risk | normal Codex use | see below |
+
+The routes never cross: neither falls back to the other. `FallbackLLM` is the
+explicit composition, and only for text; it does not dispatch `generate_image`.
+
+Account risk (spec A-1): driving the chatgpt.com web UI programmatically is against
+the ChatGPT Terms clause on programmatic extraction of output. There are no recorded
+bans for paid accounts driven in a real browser, but absence of reports is not
+safety. The web route is opt-in only: never the default and never in a default
+fallback chain. Keep to personal volume, concurrency one and a residential network.
+subllm never solves a CAPTCHA: a challenge raises `HumanActionRequired` (CLI exit 3)
+and hands the page to you.
+
+With `mode="pro"` the Pro usage cap may downgrade the model silently. The
+guarantee is the pre-send check of the picker (below); the post-run audit only
+catches a model label the page shows in the answer's "Try again" menu (below).
+
 ### ChatGPT web route (ego lite or Chrome)
 
 `ChatGPTWebLLM` sends a prompt through the official chatgpt.com web app, open in
@@ -201,9 +228,36 @@ print(res.format, res.served_model, res.conversation_url)  # https://chatgpt.com
 data = llm.complete_json("Return {...}")    # dict, prompt-instructed JSON
 ```
 
-Only `mode="default"` is available. A call makes exactly one send and never
-retries; calls are serialized per machine by a file lock (shared by both
-browsers).
+A call makes exactly one send and never retries; calls are serialized per machine
+by a file lock (shared by both browsers).
+
+#### Modes and plan
+
+```python
+llm = ChatGPTWebLLM(mode="pro", plan="pro")   # mode: default | thinking | pro
+```
+
+- `mode` picks the reasoning level in the composer's "Thinking effort" slider
+  (Instant, Medium, High, Extra High, Pro): `thinking` selects Medium, `pro` selects
+  Pro, `default` leaves the picker alone.
+- `plan` (`free` | `plus` | `pro`, default `plus`) gates modes at construction:
+  `mode="pro"` with any other plan raises `ValueError`. A bad `mode`, `plan` or
+  `browser` value also raises `ValueError`.
+- The selection is read back from the picker label before the send. If it does not
+  match, the call fails closed with `ClientError` and nothing is sent. The legacy
+  layout has no picker support, so a non-default mode fails closed there.
+- The choice persists in the browser and account, so the driver restores the
+  previous level afterwards (best effort; it never changes the call's result).
+- `timeout_s` defaults to 2700 s for `pro` and 600 s otherwise; an explicit value
+  wins. The wait for the machine-wide lock uses the same value.
+- `ModelDowngradeError` is raised when a Pro run's page names a model that is not
+  Pro. It carries `.text` (the answer), `.served_model` and `.requested_mode`. A page
+  with no model label gives `served_model=None`, which means unverified, not
+  passed. The current layout shows the served model only in the answer's "Try again"
+  menu ("Try again • <model>", for example "6 Pro" on the live Pro check). For
+  `thinking` and `pro` the driver opens that menu with a real click (only when the
+  button declares a menu), reads it, and closes it with Escape without choosing an
+  item. Default mode does not, so its `served_model` is `None`.
 
 #### Choosing the browser
 
@@ -409,10 +463,12 @@ A minimal CLI for smoke-testing and shell-out from non-Python projects:
 ```bash
 subllm complete       --client codex|claude  [--model M] [--effort E] [PROMPT]
 subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
-subllm complete       --client chatgpt-web [--browser auto|ego|chrome] [PROMPT]
+subllm complete       --client chatgpt-web [--browser auto|ego|chrome]
+                      [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
-subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome] [PROMPT]
+subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome]
+                      [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 ```
 
 `PROMPT` comes from the argument or stdin (`-`). For `complete` /
@@ -425,9 +481,17 @@ CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five wo
 
 `--browser chrome` needs `subllm[chrome]` and Google Chrome (see "Chrome
 driver"); a Chrome login request exits 3 like ego. With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
-`--browser` is rejected for the other clients. Errors print
+`--browser`, `--mode` and `--plan` are rejected for the other clients. Errors print
 `error: <Type>: <message>` to stderr and exit 1; `HumanActionRequired` exits 3
 so a wrapper can prompt the user to log in.
+
+`--mode` and `--plan` work on `complete`, `complete-json` and `image` for the web
+route only; with `--client codex|claude` or `--route codex` they are rejected
+(exit 2). `--plan` falls back to `$SUBLLM_CHATGPT_PLAN` (empty counts as unset),
+then `plus`. An invalid `$SUBLLM_CHATGPT_PLAN` is a usage error (exit 2) only when
+`--plan` is absent and the web route is used. `--mode pro` without plan `pro` is
+also a usage error (exit 2). A `ModelDowngradeError` prints
+`error: ModelDowngradeError: ...` and exits 1.
 
 `image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
@@ -483,7 +547,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (585 passed, 77 skipped)
+uv run pytest                 # no subscription, no network (665 passed, 119 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -591,7 +655,7 @@ npm --prefix ts test         # run the vitest suite
 | `RegionGuard` | `(allowed_regions=None, blocked_regions=None, lookup=default_lookup, ttl_s=300.0, on_lookup_failure="block")` — pass exactly one of allowed/blocked |
 | `DryRunLLM` | `()` |
 | `BaseLLM` | abstract base; subclass to add a client |
-| `ChatGPTWebLLM` | `(mode="default", plan="plus", browser="auto", region_guard=None, timeout_s=None)` — `timeout_s` defaults to 600; one send per call, no retry |
+| `ChatGPTWebLLM` | `(mode="default", plan="plus", browser="auto", region_guard=None, timeout_s=None)` — `timeout_s` defaults to 2700 for `mode="pro"`, else 600; `mode="pro"` needs `plan="pro"` (`ValueError`); one send per call, no retry |
 | `ChatGPTWebLLM.complete_result` | `(prompt) -> WebTextResult` |
 | `WebTextResult` | `text, format ("markdown"\|"plain"), served_model, conversation_url` (frozen) |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
@@ -619,6 +683,8 @@ Chat web route only (`ChatGPTWebLLM`):
 
 - `HumanActionRequired` — a person must log in or solve a challenge before any
   send (CLI exit 3). Carries `.browser` and `.detail`.
+- `ModelDowngradeError` — a `mode="pro"` run whose page names a non-Pro model.
+  Carries `.text`, `.served_model`, `.requested_mode`; the answer is kept.
 - `SendUnconfirmedError` — the send key was pressed but the outcome is unknown.
   The prompt is **never resent**; `.conversation_url` (or `None`) shows where to look.
 - `QuotaError` from the web route is raised only before the send key. After the

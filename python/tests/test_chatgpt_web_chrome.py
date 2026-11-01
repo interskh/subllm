@@ -948,3 +948,75 @@ def test_restore_is_skipped_when_the_browser_is_dead(chrome):
     page = chrome({"selectMode": [CLICK, DONE_PRO] + RESTORE, "auditModel": "ok"})
     mod._flow(Ctx(page), "hi", 5, "text", Path("/nonexistent"), rec, "pro")
     assert page.calls.count("selectMode") == 2
+
+
+MENU = {"selector": "#radix-_r_cq_"}
+
+
+def _menu_events(log):
+    return [e for e in log if e in (("click", MENU["selector"]), ("press", "Escape"), ("press", "Enter"))]
+
+
+def test_pro_mode_reads_the_try_again_menu_then_escapes_then_audits(chrome):
+    page = chrome({"selectMode": [DONE_PRO], "servedModelMenu": MENU, "servedModel": "6 Pro", "auditModel": "ok"})
+    r = ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert r.served_model == "6 Pro"
+    i = page.calls.index("servedModelMenu")
+    assert page.calls[i:] == ["servedModelMenu", "servedModel", "auditModel"]
+    assert _menu_events(chrome.log) == [("press", "Enter"), ("click", MENU["selector"]), ("press", "Escape")]
+    assert ("servedModel", True) in page.worlds and ("servedModelMenu", True) in page.worlds
+
+
+def test_menu_downgrade(chrome):
+    chrome({"selectMode": [DONE_PRO, DONE_MED], "servedModelMenu": MENU, "servedModel": "6 Thinking", "auditModel": "downgrade"})
+    with pytest.raises(ModelDowngradeError) as ei:
+        ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert ei.value.served_model == "6 Thinking"
+    assert ("press", "Escape") in chrome.log
+
+
+def test_menu_escape_is_pressed_even_when_served_model_throws(chrome):
+    def boom():
+        raise RuntimeError("target closed")
+
+    page = chrome({"selectMode": [DONE_PRO], "servedModelMenu": MENU, "servedModel": boom, "auditModel": "ok"})
+    r = ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert r.served_model is None
+    assert _menu_events(chrome.log)[-2:] == [("click", MENU["selector"]), ("press", "Escape")]
+
+
+def test_menu_click_failure_still_escapes_and_leaves_served_unverified(chrome):
+    page = chrome({"selectMode": [DONE_PRO], "servedModelMenu": MENU, "servedModel": "6 Pro", "auditModel": "ok"})
+    real_click = page.click
+
+    def click(sel, **kw):
+        if sel == MENU["selector"]:
+            raise RuntimeError("element detached")
+        return real_click(sel, **kw)
+
+    page.click = click
+    r = ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert r.served_model is None and ("press", "Escape") in chrome.log
+    assert "servedModel" not in page.calls[page.calls.index("servedModelMenu"):]
+
+
+def test_no_menu_means_no_click_and_unverified(chrome):
+    page = chrome({"selectMode": [DONE_PRO], "servedModelMenu": None, "servedModel": None, "auditModel": "unverified"})
+    r = ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert r.served_model is None
+    assert ("click", MENU["selector"]) not in chrome.log and ("press", "Escape") not in chrome.log
+    assert "servedModel" in page.calls
+
+
+def test_default_mode_never_asks_for_the_menu(chrome):
+    page = chrome({"servedModelMenu": MENU, "servedModel": None})
+    ChromeDriver().run_text("hi", timeout_s=5)
+    assert "servedModelMenu" not in page.calls and "servedModel" in page.calls
+    assert ("press", "Escape") not in chrome.log
+
+
+def test_restore_still_runs_after_the_menu_read(chrome):
+    page = chrome({"selectMode": [CLICK, DONE_PRO] + RESTORE, "servedModelMenu": MENU, "servedModel": "6 Pro", "auditModel": "ok"})
+    ChromeDriver().run_text("hi", timeout_s=5, mode="pro")
+    assert chrome.log.index(("press", "Escape")) < chrome.log.index(("press", "ArrowLeft"))
+    assert page.calls.count("selectMode") == 5

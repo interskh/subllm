@@ -865,7 +865,12 @@ const __page = {
     if (call.includes(").acceptance(")) return { state: "accepted", turn_key: "k", conversation_url: "https://chatgpt.com/c/fake-id" };
     if (call.includes(").turnStatus(")) return { done: true, text: "t", stop_visible: false, images: __cfg.images, error_dialog: null };
     if (call.includes(").captureText(")) return { text: "cap", format: "plain" };
-    if (call.includes(").servedModel(")) return __cfg.served;
+    if (call.includes(").servedModelMenu(")) { __log.push("servedModelMenu"); return __cfg.menu || null; }
+    if (call.includes(").servedModel(")) {
+      __log.push("servedModel");
+      if (__cfg.served_throws) throw new Error("served boom");
+      return __cfg.served;
+    }
     throw new Error("unexpected evaluate: " + call);
   },
 };
@@ -889,13 +894,13 @@ _PRO_PATH = [_CLICK, _FOCUS, _RIGHT, _RIGHT, _RIGHT, _RIGHT, _ESC, _DONE_PRO]
 _RESTORE_PATH = [_act("Pro", action="click", selector="button[aria-label='Select ChatGPT model']"), _act("Pro", action="key", key="ArrowLeft"), _DONE_MED]
 
 
-def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text"):
+def _run_mode(tmp_path, picks, *, mode="pro", states=None, audit="ok", served="GPT-6 Pro", kind="text", menu=None, served_throws=False):
     kp = tmp_path / "keypress"
     body = build_script(
         "hi", space="subllm-chatgpt-abcd1234", timeout_ms=600000, keypress_file=str(kp), mode=mode,
         **({"kind": "image", "image_dir": "/img/dir"} if kind == "image" else {}),
     )
-    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "images": ["blob:a"] if kind == "image" else []}
+    cfg = {"picks": picks, "states": states or [_CHAT], "audit": audit, "served": served, "menu": menu, "served_throws": served_throws, "images": ["blob:a"] if kind == "image" else []}
     runtime = _MODE_RUNTIME.replace("%CFG%", json.dumps(cfg))
     prog = tmp_path / "run.js"
     prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
@@ -1040,3 +1045,56 @@ def test_downgrade_result_maps_to_model_downgrade_error(ego):
     e = ei.value
     assert (e.text, e.served_model, e.requested_mode) == ("ans", "m", "pro")
     assert '"mode": "pro"' in (ego.dir / "script.js").read_text()
+
+
+_MENU = {"selector": "#radix-_r_cq_"}
+_MENU_CLICK = "click #radix-_r_cq_"
+
+
+@needs_node
+def test_pro_mode_reads_the_try_again_menu_then_escapes_then_audits(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], menu=_MENU, served="6 Pro")
+    i = log.index("servedModelMenu")
+    assert log[i:i + 6] == ["servedModelMenu", _MENU_CLICK, "servedModel", "press Escape", "auditModel", "finish"]
+    assert results[0]["ok"] is True and results[0]["served_model"] == "6 Pro"
+    assert "press Enter" in log[:i] and log.count("press Enter") == 1
+
+
+@needs_node
+def test_pro_mode_menu_downgrade(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], menu=_MENU, served="6 Thinking", audit="downgrade")
+    r = results[0]
+    assert r["kind"] == "downgrade" and r["served_model"] == "6 Thinking" and r["requested_mode"] == "pro"
+    assert log.index("press Escape", log.index(_MENU_CLICK)) < log.index("auditModel")
+
+
+@needs_node
+def test_menu_escape_is_pressed_even_when_served_model_throws(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], menu=_MENU, served_throws=True)
+    i = log.index(_MENU_CLICK)
+    assert log[i:i + 3] == [_MENU_CLICK, "servedModel", "press Escape"]
+    assert results[0]["ok"] is True and results[0]["served_model"] is None
+
+
+@needs_node
+def test_no_menu_means_no_click_and_unverified(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], menu=None, served=None)
+    assert "servedModelMenu" in log and _MENU_CLICK not in log
+    assert results[0]["ok"] is True and results[0]["served_model"] is None
+
+
+@needs_node
+def test_default_mode_never_asks_for_the_menu(tmp_path):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", menu=_MENU, served=None)
+    assert "servedModelMenu" not in log and _MENU_CLICK not in log and "servedModel" in log
+    assert log.count("press Escape") == 0
+
+
+@needs_node
+def test_restore_still_runs_after_the_menu_read(tmp_path):
+    kp, log, results, _ = _run_mode(
+        tmp_path, [_act("Medium", action="click", selector="s"), _DONE_PRO] + _RESTORE_PATH, menu=_MENU
+    )
+    assert results[0]["ok"] is True
+    assert log.index("press Escape", log.index(_MENU_CLICK)) < log.index("selectMode Medium")
+    assert log[-1] == "finish"

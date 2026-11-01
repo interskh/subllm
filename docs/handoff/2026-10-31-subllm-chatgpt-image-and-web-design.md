@@ -458,3 +458,52 @@ implement-loop: slice 4 shipped d96d7eb; remaining: [5]
 **Deferred**: README/drivers-contract docs for the flags (not in T2 file list); live pro run (T3).
 
 **Touches**: `python/src/subllm/{chatgpt_web,cli}.py`, tests `test_chatgpt_web_llm.py`, `test_cli_chatgpt_web.py`, `test_cli_image.py`. Shared: CLI flags `--mode/--plan`, env `SUBLLM_CHATGPT_PLAN`, `ChatGPTWebLLM` constructor contract. Mutants 10/10 caught.
+
+### T3 — docs
+
+**Decisions**
+- README: new "Choosing a route" table + risk paragraph (before the web route section), "Modes and plan" subsection, CLI/API/error entries; counts set to 652 passed / 101 skipped (status line and Testing).
+- drivers-contract: MODE SELECTION / MODE ORDER / AUDIT / MODE RESTORE / TIMEOUT items appended to the chatgpt_web section; page-core list now names selectMode and auditModel.
+- The served-label sentence is a placeholder marked `<!-- LIVE-LABEL -->` in README for the orchestrator to replace after the live check.
+
+**Rejected**
+- Documenting the downgrade text in the CLI output: the CLI prints only type and message.
+
+**Assumptions**
+- "Legacy layout fails closed" rests on the picker selector (`button[aria-label='Select ChatGPT model']`) being absent there, giving `fail: model picker not found`; not verified on a legacy capture.
+- "about 1536x1024" for Codex images is from the spec/brief, not re-measured.
+- Docs not run, no tests run (live run holds the lock).
+
+**Deferred**: live-label sentence; live pro run results.
+
+**Touches**: `README.md`, `docs/drivers-contract.md` only.
+
+### T3 — served-model label
+
+**Decisions**
+- `servedModel` reads the open `[role=menu]` whose `aria-labelledby` equals this turn's Regenerate button id (first "Try again" item, text after "•", trimmed); falls back to `data-message-model-slug`, then null. New pure `servedModelMenu` returns `{selector: "#"+CSS.escape(id)}` only for a rendered button with `aria-haspopup="menu"` and an id.
+- Both substrates, non-default mode only, after capture and before the audit: click selector, wait 600 ms, `servedModel`, Escape in a finally (+300 ms). Any error there (including a throwing `servedModelMenu`) leaves served null, which `auditModel` reports as unverified; the audit call itself still runs. Default mode reads `servedModel` as before.
+- Fixture `redesign-completed-pro-menu.html` = live thread `main` + popper wrapper with the menu, sanitized in one pass (button id and `aria-labelledby` survive; UUIDs mapped). Text residue is only generic UI strings plus the synthetic prompt/answer/menu labels (allow-listed via `--allow`).
+- Docs: LIVE-LABEL sentence replaced; drivers-contract gained a SERVED MODEL item and the page-core list names `servedModelMenu`; README counts 665 passed / 119 skipped.
+
+**Rejected**
+- Reading the label from the turn DOM: live capture has none.
+- Clicking a menuitem or pressing Enter: regenerates the answer.
+- Hover tooltip text ("Try again…"): carries no model.
+
+**Assumptions**
+- Real `page.click` on the button opens the menu within 600 ms in both substrates (live ego check only; Chrome path untested live). The menu's first "Try again" item keeps the "Try again • <model>" shape; a layout change gives null (unverified), never a false pass.
+- The action-row button is `rendered()` (opacity not 0) after completion, as the Copy button must be.
+
+**Deferred**
+- Default mode stays `served_model=None` on this layout (no menu read by design). Escape failing to close the menu is not detected.
+
+**Touches**
+- `drivers/chatgpt_web/{page_core.js,ego_run.js,chrome.py}`, tests `test_chatgpt_web_{core,ego,chrome}.py`, fixture `redesign-completed-pro-menu.html`, README.md, docs/drivers-contract.md. Shared: page_core export `servedModelMenu`; generated-script behavior for mode != default.
+
+**Orchestrator additions (slice 5): live results** (ego lite, logged in, Chat mode confirmed by the driver before each send; no login wall, no challenge)
+- Picker probes (no send, no quota): redesign slider levels Instant / Medium / High / Extra High / Pro; `data-selected-reasoning-effort` does not track Pro; a level change persists across reloads; the picker was restored to Medium after every probe.
+- Live call 1, the one Pro turn: `uv run subllm complete --client chatgpt-web --mode pro --plan pro "<one-token prompt>"` rc 0 in about 41 s, the token printed. Codex/claude tripwire stubs first on PATH: log empty. Afterwards the home-page picker read Medium (restore worked); reopening the conversation shows its own picker label "Pro".
+- Served-model label after completion: none in the turn DOM (no model attribute, no model text). The only label is the first item of the answer's "Try again" menu (Regenerate button, `aria-haspopup="menu"`): "Try again • 6 Pro". Opening the menu and pressing Escape did not regenerate. This run predates the T3 menu read, so its served_model was None (unverified).
+- Live call 2, the optional thinking turn (Python API `ChatGPTWebLLM(mode="thinking").complete_result`, to see served_model): ok in 18 s, format markdown, served_model "6 Thinking" read through the T3 menu path, server-id conversation URL. Selection was the no-change path (picker already at Medium). Home picker still Medium afterwards; tripwire log empty.
+- Not verified live: the T3 menu read on a Pro turn (fixture from the live Pro capture covers it), any picker change on Chrome, a real downgrade.

@@ -101,6 +101,29 @@ INERT_SLIDER_ROW = (
     " r.parentElement.setAttribute('inert', ''); return true; })()"
 )
 
+MENU_FIXTURE = "redesign-completed-pro-menu.html"
+MENU_KEY = turn_key(MENU_FIXTURE)
+SEL_LABEL = (
+    "(() => { const m = ($CORE).servedModelMenu(%s); const b = m && document.querySelector(m.selector);"
+    " return b ? b.getAttribute('aria-label') : null; })()" % json.dumps(MENU_KEY)
+)
+NO_HASPOPUP = (
+    "(() => { document.querySelector(\"button[aria-label='Regenerate response']\").removeAttribute('aria-haspopup');"
+    " return true; })()"
+)
+MENU_THINKING = (
+    "(() => { const s = Array.from(document.querySelectorAll('[role=menu] [role=menuitem] span span'))"
+    ".find(x => x.textContent.includes('6 Pro')); s.textContent = ' \u2022 6 Thinking'; return true; })()"
+)
+MENU_OTHER_LABEL = (
+    "(() => { document.querySelector('[role=menu]').setAttribute('aria-labelledby', 'radix-other'); return true; })()"
+)
+AUDIT_SERVED = "(() => { const c = ($CORE); return c.auditModel('pro', c.servedModel(%s)); })()"
+REMOVE_MENU = "(() => { document.querySelector('[role=menu]').remove(); return true; })()"
+CLOSE_MENU = (
+    "(() => { document.querySelector('[role=menu]').setAttribute('data-state', 'closed'); return true; })()"
+)
+
 DECODE_IMAGES = "(async () => { await Promise.all(Array.from(document.images).map(i => i.decode())); return true; })()"
 
 GROUPS = [
@@ -224,6 +247,35 @@ GROUPS = [
         ("pre_decode", DECODE_IMAGES),
         ("image_probe", call("turnStatus", KEY, None)),
     ]),
+    (MENU_FIXTURE, [
+        ("menu_model", call("servedModel", MENU_KEY)),
+        ("menu_model_nokey", call("servedModel", None)),
+        ("menu_btn", call("servedModelMenu", MENU_KEY)),
+        ("menu_btn_label", SEL_LABEL),
+        ("menu_state", call("state")),
+        ("menu_audit_ok", call("auditModel", "pro", "6 Pro")),
+        ("pre_other_labelledby", MENU_OTHER_LABEL),
+        ("menu_wrong_owner", call("servedModel", MENU_KEY)),
+    ]),
+    (MENU_FIXTURE, [
+        ("pre_close_menu", CLOSE_MENU),
+        ("menu_closed_model", call("servedModel", MENU_KEY)),
+        ("menu_closed_btn", call("servedModelMenu", MENU_KEY)),
+    ]),
+    (MENU_FIXTURE, [
+        ("pre_no_haspopup", NO_HASPOPUP),
+        ("menu_no_popup", call("servedModelMenu", MENU_KEY)),
+    ]),
+    (MENU_FIXTURE, [
+        ("pre_thinking", MENU_THINKING),
+        ("menu_thinking", call("servedModel", MENU_KEY)),
+        ("menu_thinking_audit", AUDIT_SERVED % json.dumps(MENU_KEY)),
+    ]),
+    (MENU_FIXTURE, [
+        ("pre_remove_menu", REMOVE_MENU),
+        ("menu_removed", call("servedModel", MENU_KEY)),
+    ]),
+    (COMPLETED, [("completed_menu_btn", call("servedModelMenu", KEY))]),
     ("synthetic-legacy-error-alert.html", [
         ("legacy_alert_probe", SETTLED % (json.dumps(None), json.dumps(None))),
     ]),
@@ -502,6 +554,48 @@ def test_composer_matches_normalises_both_sides(r):
 
 
 def test_served_model_is_null_on_redesign(r):
+    assert r["model"] is None
+
+
+def test_served_model_comes_from_the_open_try_again_menu(r):
+    assert r["menu_model"] == "6 Pro"
+    assert r["menu_model_nokey"] == "6 Pro"
+    assert r["menu_audit_ok"] == "ok"
+
+
+def test_served_model_menu_selects_this_turns_regenerate_button(r):
+    assert r["menu_btn"]["selector"].startswith("#")
+    assert r["menu_btn_label"] == "Regenerate response"
+
+
+def test_served_model_menu_needs_the_popup_declaration(r):
+    assert r["menu_no_popup"] is None
+
+
+def test_served_model_ignores_a_menu_owned_by_another_button(r):
+    assert r["menu_wrong_owner"] is None
+
+
+def test_served_model_ignores_a_closed_menu(r):
+    assert r["menu_closed_model"] is None
+    assert r["menu_closed_btn"]["selector"].startswith("#")
+
+
+def test_served_model_menu_label_is_what_the_audit_judges(r):
+    assert r["menu_thinking"] == "6 Thinking"
+    assert r["menu_thinking_audit"] == "downgrade"
+
+
+def test_served_model_is_null_when_the_menu_is_gone(r):
+    assert r["menu_removed"] is None
+
+
+def test_menu_fixture_is_not_a_quota_state(r):
+    assert r["menu_state"]["quota"] is False
+
+
+def test_closed_menu_completed_fixture_offers_the_button_but_no_label(r):
+    assert r["completed_menu_btn"]["selector"].startswith("#")
     assert r["model"] is None
 
 

@@ -220,7 +220,25 @@
     return captured.trim() ? { text: captured, format: "markdown" } : fallback();
   };
 
+  // The current layout shows the served model only in the answer's "Try again" menu.
+  const regenButton = (turn_key) => {
+    const turn = findTurn(turn_key);
+    return turn ? firstRendered(turn, "button[aria-label='Regenerate response']") : null;
+  };
+  const servedModelMenu = (turn_key) => {
+    const b = regenButton(turn_key);
+    if (!b || b.getAttribute("aria-haspopup") !== "menu" || !b.id) return null;
+    return { selector: "#" + CSS.escape(b.id) };
+  };
   const servedModel = (turn_key) => {
+    const b = regenButton(turn_key);
+    const menu = b && b.id && q(document, "[role=menu][data-state=open]").find((m) => m.getAttribute("aria-labelledby") === b.id);
+    if (menu) {
+      const item = q(menu, "[role=menuitem]").find((i) => /^\s*Try again/.test(i.textContent || ""));
+      const m = item && (item.textContent || "").match(/•(.*)$/);
+      const label = m && m[1].trim();
+      if (label) return label;
+    }
     const scope = assistantScope(findTurn(turn_key));
     if (!scope) return null;
     const el = scope.matches("[data-message-model-slug]") ? scope : scope.querySelector("[data-message-model-slug]");
@@ -275,5 +293,5 @@
     return /\bpro\b/i.test(served) ? "ok" : "downgrade";
   };
 
-  return { state, composerMatches, acceptance, turnStatus, captureText, servedModel, selectMode, auditModel };
+  return { state, composerMatches, acceptance, turnStatus, captureText, servedModel, servedModelMenu, selectMode, auditModel };
 })()

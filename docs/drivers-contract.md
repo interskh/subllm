@@ -543,8 +543,8 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   challenge, mode_surface, layout, busy, quota), `composerMatches(prompt)`,
   `acceptance()` (pending | accepted | rejected, turn_key, conversation_url),
   `turnStatus(turn_key)`, `captureText(turn_key)` (Copy-button markdown, falls
-  back to `innerText`), `servedModel(turn_key)`. The core never generates input. `selectMode` arrives with modes in a later
-  release. Error-text scans (`acceptance` rejection, `turnStatus.error_dialog`)
+  back to `innerText`), `servedModel(turn_key)`, `servedModelMenu(turn_key)`, `selectMode(target)`, `auditModel(mode, served)`.
+  The core never generates input. Error-text scans (`acceptance` rejection, `turnStatus.error_dialog`)
   skip the user message and the assistant answer body, so a prompt or answer
   that starts with "Unknown error" is not read as a failure.
 - INPUT (D-3a). Bring the tab to front (`Page.bringToFront`), type with per-key
@@ -657,3 +657,48 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   result is a `SendUnconfirmedError` with the conversation URL.
 - IMAGE BUDGET. The subprocess budget is `timeout_s + 120 + 0.06 * len(prompt)`
   seconds, plus 60 s for image runs. Image runs are never retried.
+- MODE SELECTION (D-8). `selectMode(target)` is a pure step planner for the composer's
+  "Thinking effort" slider (levels Instant, Medium, High, Extra High, Pro; `thinking`
+  = Medium, `pro` = Pro, or a level name). Radix opens on real pointer input, so the
+  core never dispatches events: each call returns `{action, current, ...}` with
+  `action` one of `click` (`selector`), `focus` (`selector`), `key` (`key`), `done`
+  (`selected_label`) or `fail` (`detail`), and the substrate performs it with real
+  input and asks again. `current` is the level read from the trigger label (or from
+  the open menu's status line). Only `done`, meaning the closed trigger's label equals
+  the target, counts as selected. The loop is bounded at 16 steps with 350 ms between
+  them; running out of steps is a failure. A missing picker (legacy layout), an
+  unknown level or a locked slider is `fail`.
+- MODE ORDER. The picker runs after the pre-send checks and the new-chat check and
+  before the composer is focused and the keypress record is written. After a
+  selection, `state()` is read again and must be logged in, in Chat mode and not
+  busy (a usage-limit dialog is `quota`); otherwise `client` ("Chat mode not
+  confirmed after mode selection"). A failed or unconfirmed selection is `client`
+  with nothing typed. `mode="default"` skips the picker and the audit entirely.
+- SERVED MODEL. The completed turn's DOM carries no model label on the current
+  layout. The label is in the menu of the turn's `button[aria-label='Regenerate
+  response']` (`aria-haspopup="menu"`, a Radix `id`): the first menuitem reads
+  "Try again • <model>". For a non-default mode, after capture and before the audit,
+  the script calls `servedModelMenu(turn_key)` (`{selector}` of that button, or null
+  unless the button is rendered, declares `aria-haspopup="menu"` and has an id), does
+  a real click on the selector, waits about 600 ms, reads `servedModel(turn_key)`
+  (the text after "•" in the first "Try again" item of the open `[role=menu]` whose
+  `aria-labelledby` is that button's id; else `data-message-model-slug`; else null),
+  and always presses Escape (about 300 ms) afterwards. It never clicks a menuitem or
+  presses Enter, because that would regenerate the answer. Errors in this step are
+  swallowed and leave `served` null (unverified). `mode="default"` makes no menu
+  interaction and reads `servedModel` as before, so its `served_model` is null.
+- AUDIT. After the answer is captured and the served model is read, for a non-default
+  mode the script calls `auditModel(mode, served)`: `unverified` (no label), `ok` (mode is
+  not `pro`, or the label contains the word "pro"), or `downgrade`. `downgrade` ends
+  the run (before any image is fetched) with `SUBLLM_RESULT {"ok": false, "kind":
+  "downgrade", "text": ..., "served_model": ..., "requested_mode": ...}`, which
+  Python raises as `ModelDowngradeError`. `unverified` returns the result with
+  `served_model: null`.
+- MODE RESTORE. The first `current` seen by the picker is the restore target; it is
+  set when it differs from the selected label or the selection failed (so an opened
+  menu is closed again). After the outcome, the same bounded loop selects it back.
+  Restore is best effort: errors are swallowed, it never changes the result, and it
+  is skipped for `human_action` (ego) and when the Chrome call was killed by its
+  limit. The choice persists in the browser/account, which is why it is restored.
+- TIMEOUT. `timeout_s` defaults to 2700 s for `mode="pro"` and 600 s otherwise (the
+  flock wait uses the same value).

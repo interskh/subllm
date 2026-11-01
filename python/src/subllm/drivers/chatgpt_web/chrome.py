@@ -439,7 +439,24 @@ def _flow_steps(page, picker: _Picker, prompt: str, timeout_s: float, kind: str,
     cap = core("captureText", turn_key, main_world=True)
     if not image and not (cap and str(cap.get("text") or "").strip()):
         raise _Stop("output", "empty answer")
-    served = core("servedModel", turn_key)
+    served = None
+    menu = None
+    if mode != "default":
+        with contextlib.suppress(Exception):
+            menu = core("servedModelMenu", turn_key)
+    if menu:
+        try:
+            page.click(menu["selector"])
+            _sleep(0.6)
+            served = core("servedModel", turn_key)
+        except Exception:
+            served = None
+        finally:
+            with contextlib.suppress(Exception):
+                page.keyboard.press("Escape")
+                _sleep(0.3)
+    else:
+        served = core("servedModel", turn_key)
     if mode != "default" and core("auditModel", mode, served) == "downgrade":
         raise _Stop(
             "downgrade",

@@ -159,7 +159,24 @@ try {
 
   const cap = await core("captureText", acc.turn_key);
   if (!image && (!cap || !String(cap.text || "").trim())) stop("output", "empty answer");
-  const served = await core("servedModel", acc.turn_key);
+  let served = null;
+  let menu = null;
+  if (MODE !== "default") {
+    try { menu = await core("servedModelMenu", acc.turn_key); } catch (e) { menu = null; }
+  }
+  if (menu) {
+    try {
+      await page.click(menu.selector, { label: "open the answer's Try again menu" });
+      await sleep(600);
+      served = await core("servedModel", acc.turn_key);
+    } catch (e) {
+      served = null;
+    } finally {
+      try { await page.keyboard.press("Escape"); await sleep(300); } catch (e) { /* menu close is best effort */ }
+    }
+  } else {
+    served = await core("servedModel", acc.turn_key);
+  }
   if (MODE !== "default" && (await core("auditModel", MODE, served)) === "downgrade") {
     stop("downgrade", "requested " + MODE + ", served " + served, {
       text: (cap && cap.text) || "",
