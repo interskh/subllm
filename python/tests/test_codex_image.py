@@ -287,3 +287,34 @@ def test_out_dir_without_search_permission_is_client_error(env, tmp_path):
     finally:
         d.chmod(0o700)
     assert not (log / "calls.txt").exists()
+
+
+def test_references_are_attached_absolute_in_order(env, tmp_path, monkeypatch):
+    log, out, _ = env
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    (refs / "sheet.png").write_bytes(PNG)
+    (refs / "pose.png").write_bytes(PNG)
+    monkeypatch.chdir(tmp_path)
+    res = CodexLLM().generate_image("x", out, references=["refs/sheet.png", refs / "pose.png"])
+    argv = (log / "argv.txt").read_text().splitlines()
+    idx = [i for i, a in enumerate(argv) if a == "-i"]
+    assert [argv[i + 1] for i in idx] == [str((refs / "sheet.png").resolve()), str((refs / "pose.png").resolve())]
+    assert max(idx) < argv.index("--")
+    assert [p.read_bytes() for p in res.paths] == [b"PNGDATA"]
+
+
+def test_no_references_means_no_image_flag(env):
+    log, out, _ = env
+    CodexLLM().generate_image("x", out)
+    assert "-i" not in (log / "argv.txt").read_text().splitlines()
+
+
+def test_missing_reference_is_client_error_before_codex_runs(env, tmp_path):
+    log, out, _ = env
+    with pytest.raises(ClientError, match="reference"):
+        CodexLLM().generate_image("x", out, references=[tmp_path / "nope.png"])
+    with pytest.raises(ClientError, match="reference"):
+        CodexLLM().generate_image("x", out, references=[tmp_path])
+    assert not (log / "calls.txt").exists()
+    assert not out.exists() or list(out.iterdir()) == []

@@ -225,9 +225,10 @@ def _run_image(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     else:
         from subllm.codex import CodexLLM
         client = CodexLLM()
+    extra = {"references": args.ref} if args.ref else {}
 
     try:
-        result = client.generate_image(_read_prompt(args.prompt), args.out_dir)
+        result = client.generate_image(_read_prompt(args.prompt), args.out_dir, **extra)
         document = _json_document({
             "paths": [str(p) for p in result.paths],
             "route": result.route,
@@ -273,6 +274,8 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--mode", default=None, choices=_MODE_CHOICES)
     i.add_argument("--plan", default=None, choices=_PLAN_CHOICES)
     i.add_argument("-o", "--out-dir", required=True)
+    i.add_argument("--ref", action="append", default=None, metavar="FILE",
+                   help="reference image attached to the prompt (repeatable; codex route only)")
     i.add_argument("prompt", nargs="?", default=None)
 
     try:
@@ -290,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
             for flag in ("browser", "mode", "plan"):
                 if getattr(args, flag) is not None:
                     parser.error(f"--{flag} is only supported with --route web")
+        if args.cmd == "image" and args.route == "web" and args.ref:
+            parser.error("--ref is only supported with --route codex")
         if args.cmd == "web-agent":
             return _run_web_agent(args)
         if args.cmd == "image":

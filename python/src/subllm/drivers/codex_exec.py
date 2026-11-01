@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from subllm.errors import ClientError, QuotaError
 
@@ -40,6 +40,7 @@ def run_codex_exec(
     schema_path: str | None = None,
     timeout_s: int = 120,
     collect_images: Callable[[list[Path]], None] | None = None,
+    images: Sequence[str | Path] = (),
 ) -> str:
     """Run one non-interactive codex turn. Returns the final message text.
 
@@ -71,6 +72,9 @@ def run_codex_exec(
             argv += ["-c", 'web_search="live"']
         if schema_path:
             argv += ["--output-schema", schema_path]
+        for img in images:
+            # absolute: codex runs in a throwaway work dir, not the caller's cwd
+            argv += ["-i", str(Path(img).expanduser().resolve())]
         if collect_images:
             work_dir = tempfile.mkdtemp(prefix="subllm-codex-work-")
             argv += ["-C", work_dir]

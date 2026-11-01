@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from subllm._images import prepare_out_dir, save_numbered
 from subllm.base import BaseLLM, ImageGenerator, ImageResult, _retry, _validate_with_model
@@ -83,11 +83,19 @@ class CodexLLM(BaseLLM, ImageGenerator):
             return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
 
-    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult:
+    def generate_image(
+        self, prompt: str, out_dir: str | Path, *, references: Sequence[str | Path] = (),
+    ) -> ImageResult:
         """One image turn. ONE attempt, no retry: a refusal or timeout would
-        re-spend ~46 s and Codex quota per attempt; the caller decides."""
+        re-spend ~46 s and Codex quota per attempt; the caller decides.
+        `references` are image files attached to the prompt (codex `-i`), e.g.
+        a character sheet the new image must match."""
         if self._guard is not None:
             self._guard.check()  # RegionError before any subprocess
+        refs = [Path(r).expanduser() for r in references]
+        for r in refs:
+            if not r.is_file():
+                raise ClientError(f"reference image is not a file: {r}")
         dest = prepare_out_dir(out_dir)
         saved: list[Path] = []
 
@@ -103,6 +111,7 @@ class CodexLLM(BaseLLM, ImageGenerator):
             codex_home=self._codex_home,
             timeout_s=max(self._timeout_s, 300),
             collect_images=_collect,
+            images=refs,
         )
         return ImageResult(
             paths=saved, route="codex", text=text,

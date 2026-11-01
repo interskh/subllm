@@ -173,7 +173,10 @@ Spends Codex quota (about 46 s per image). Files are saved as
 attempt with no retry, so a refusal or timeout does not re-spend quota. It
 raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
-`CodexLLM` implements the `ImageGenerator` interface.
+`references=[path, ...]` attaches image files to the prompt (codex `-i`), for
+example a character sheet the new image must match; a missing file raises
+`ClientError` before codex starts. `CodexLLM` implements the `ImageGenerator`
+interface.
 
 ### Choosing a route
 
@@ -472,7 +475,7 @@ subllm complete       --client chatgpt-web [--browser auto|ego|chrome]
                       [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
-subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome]
+subllm image          --route codex|web -o OUT_DIR [--ref FILE ...] [--browser auto|ego|chrome]
                       [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 ```
 
@@ -500,8 +503,9 @@ also a usage error (exit 2). A `ModelDowngradeError` prints
 
 `image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
-stderr and exits 1. With `--route web`, `--browser` selects the browser (rejected
-for `--route codex`, exit 2), a `SendUnconfirmedError` line ends with
+stderr and exits 1. `--ref FILE` (repeatable) attaches reference images on the
+codex route and is rejected for `--route web` (exit 2). With `--route web`,
+`--browser` selects the browser (rejected for `--route codex`, exit 2), a `SendUnconfirmedError` line ends with
 `(conversation: <url>)`, and `HumanActionRequired` exits 3.
 
 ### `web-agent` (machine-facing)
@@ -665,7 +669,7 @@ npm --prefix ts test         # run the vitest suite
 | `WebTextResult` | `text, format ("markdown"\|"plain"), served_model, conversation_url` (frozen) |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
 | `ChatGPTWebLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry, route `"web"` |
-| `CodexLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry |
+| `CodexLLM.generate_image` | `(prompt, out_dir, *, references=()) -> ImageResult` — one attempt, no retry; `references` are files attached with codex `-i` |
 | `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
 | `ImageGenerator` | abstract base with `generate_image(prompt, out_dir)` |
 | `WebAgentResult` | `client, model, answer, trace, retrieved_urls, fetch_events_exposed, trace_complete, tools, client_version, duration_ms` (frozen; `.to_json()` gives the CLI document) |

@@ -50,6 +50,9 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
     elsewhere, so the rest of the home is never scanned.
   - The prompt is prefixed with a fixed instruction to call the image tool
     exactly once and not answer with SVG/HTML/code.
+  - `references` become `-i <absolute path>` pairs before `--` (absolute because
+    the cwd is the throwaway work dir); each must be an existing file, checked
+    before the subprocess starts (ClientError).
   - Zero files collected => OutputError. One attempt, no retry.
 
 ## claude_tmux

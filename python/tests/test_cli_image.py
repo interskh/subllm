@@ -277,3 +277,30 @@ def test_web_model_downgrade_prints_typed_error(egoimg, monkeypatch, capsys):
     monkeypatch.setenv("STUB_CODE", "1")
     assert _web(out, "--mode", "pro", "--plan", "pro") == 1
     assert capsys.readouterr().err.startswith("error: ModelDowngradeError:")
+
+
+def test_ref_flags_reach_codex(fake_bin, home, tmp_path, monkeypatch, capsys):
+    log = tmp_path / "argv.txt"
+    monkeypatch.setenv("ARGV_LOG", str(log))
+    _stub(fake_bin, _WRITE)
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    a.write_bytes(b"A")
+    b.write_bytes(b"B")
+    rc = main(["image", "--route", "codex", "-o", str(tmp_path / "o"),
+               "--ref", str(a), "--ref", str(b), "x"])
+    assert rc == 0
+    argv = log.read_text().splitlines()
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "-i"] == [str(a.resolve()), str(b.resolve())]
+
+
+def test_ref_rejected_for_web_route(capsys):
+    assert main(["image", "--route", "web", "--ref", "a.png", "-o", "o", "x"]) == 2
+    assert "--ref" in capsys.readouterr().err
+
+
+def test_missing_ref_is_typed_error(fake_bin, home, tmp_path, capsys):
+    _stub(fake_bin, _WRITE)
+    rc = main(["image", "--route", "codex", "-o", str(tmp_path / "o"), "--ref", str(tmp_path / "nope.png"), "x"])
+    assert rc == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: ClientError:")
