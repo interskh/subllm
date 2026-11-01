@@ -336,3 +336,28 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 - Login helper waits on the opened page's `close` event, then leaves `_open_context`, which closes the context so Chrome exits (on macOS the context `close` event only fires when the browser process quits).
 - The three availability/launch tests inject fake `patchright` modules via `sys.modules`; verified by running the whole chrome test file with `sys.modules["patchright"] = None` (50 passed).
 - Mutants: fetch bound removed and login wait reverted to the context were each caught by a new test.
+
+### T2 — Chrome fixture tests
+
+**Decisions**
+- Module fixture `r` is parametrized over ["ego", "chrome"]; each skips on its own (ego-browser on PATH; patchright importable + `_chrome_executable()`). Module-level skipif now only checks SUBLLM_BROWSER. All 31 tests run on both from the one GROUPS table.
+- Chrome runner: own `sync_playwright` + `launch_persistent_context(tmp profile, channel="chrome", headless=True)`, `ctx.route("**/*", abort)`, `goto about:blank` + `set_content`. Not `_open_context` (owned profile, headful).
+- Worlds: `pre_*` steps and `CLIP_ROUNDTRIP` (composed, evaluated directly) -> main world; plain `call()` steps go through `chrome.call_core` (new `Call(str)` subclass carries name/args; the ego payload is unchanged) with `main_world=True` only for `captureText`; SETTLED and all other core calls -> isolated.
+- Chrome-only tests: `_FETCH_JS` main-world fetch of the big image data: URL -> b64 decode == fixture payload + PNG signature; `call_core` captureText main vs isolated on a main-world Copy handler (main = markdown, isolated = plain).
+- Result: no Chrome-vs-ego difference; all page_core checks pass on both. No chrome.py change. pyproject `browser` marker text updated.
+
+**Rejected**
+- Routing CLIP_ROUNDTRIP through call_core (it composes a clipboard-restore check around captureText, so it needs direct evaluation).
+- Feeding the image through the driver's write helper: the decode/write is two inline lines in `_flow`, no helper exists; the test decodes with `b64decode(validate=True)` as the driver does.
+- First mutation (call_core always isolated) was NOT caught by the 31 shared tests (clip_md uses the direct main-world expression; live_md_capture asserts plain, which both worlds satisfy) -> added the call_core captureText test above.
+
+**Assumptions**
+- Headless Chrome with `about:blank` + `set_content` is a non-secure context (`navigator.clipboard` absent), same as ego's document.write page; the FAKE_CLIPBOARD step handles it.
+- Network abort covers everything (data: URLs are not routed); no fixture request was blocked in a way that failed a test.
+
+**Deferred**
+- Real chatgpt.com in Chrome (send path, copy handler there) stays unverified by user decision.
+
+**Touches**
+- `python/tests/test_chatgpt_web_core.py`, `python/pyproject.toml` (marker text only). Test count with SUBLLM_BROWSER=1: 64 (31 ego, 33 chrome).
+- Mutants: call_core isolated -> caught by the new test (1/1); `_FETCH_JS` slice off by one -> caught by the image test (1/1). chrome.py restored (sha verified, git diff empty).

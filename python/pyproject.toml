@@ -20,7 +20,7 @@ dev = ["pytest>=8"]
 [tool.pytest.ini_options]
 markers = [
     "integration: live tests that call the real codex/claude subscriptions; opt in with SUBLLM_LIVE=1",
-    "browser: loads DOM fixtures into a real ego lite page; opt in with SUBLLM_BROWSER=1",
+    "browser: loads DOM fixtures into a real ego lite page and headless Chrome (no network); opt in with SUBLLM_BROWSER=1",
 ]
 
 [build-system]

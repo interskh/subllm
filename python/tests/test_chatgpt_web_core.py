@@ -1,8 +1,10 @@
 """Browser tests for drivers/chatgpt_web/page_core.js.
 
-Loads DOM fixtures into a real ego lite page (about:blank + document.write) and
-calls the pure page functions. Never navigates to chatgpt.com or any network
-URL. Opt in: SUBLLM_BROWSER=1 (needs `ego-browser` on PATH).
+Loads DOM fixtures into a real browser page and calls the pure page functions, on two
+substrates: ego lite (about:blank + document.write; needs `ego-browser` on PATH) and the
+real ChromeDriver call path (patchright + Google Chrome, headless, throwaway profile,
+every network request aborted). Never navigates to chatgpt.com or any network URL.
+Opt in: SUBLLM_BROWSER=1.
 """
 from __future__ import annotations
 
@@ -12,16 +14,14 @@ import re
 import secrets
 import shutil
 import subprocess
+import base64
 from pathlib import Path
 
 import pytest
 
 pytestmark = [
     pytest.mark.browser,
-    pytest.mark.skipif(
-        not os.environ.get("SUBLLM_BROWSER") or not shutil.which("ego-browser"),
-        reason="needs SUBLLM_BROWSER=1 and ego-browser on PATH",
-    ),
+    pytest.mark.skipif(not os.environ.get("SUBLLM_BROWSER"), reason="needs SUBLLM_BROWSER=1"),
 ]
 
 FIXTURES = Path(__file__).parent / "fixtures" / "chatgpt_web"
@@ -31,8 +31,14 @@ UUID = "11111111-2222-4333-8444-555555555555"
 TAG = "SUBLLM_FIXTURE "
 
 
+class Call(str):
+    """A plain page_core call; the chrome substrate runs it through chrome.call_core."""
+
+
 def call(name, *args):
-    return "($CORE)." + name + "(" + ",".join(json.dumps(a) for a in args) + ")"
+    c = Call("($CORE)." + name + "(" + ",".join(json.dumps(a) for a in args) + ")")
+    c.name, c.args = name, args
+    return c
 
 
 def turn_key(fixture):
@@ -189,8 +195,7 @@ def build_script(groups):
     )
 
 
-@pytest.fixture(scope="module")
-def r():
+def _run_ego():
     proc = subprocess.run(
         ["ego-browser", "nodejs"],
         input=build_script(GROUPS),
@@ -201,7 +206,73 @@ def r():
     out = proc.stdout + "\n" + proc.stderr
     lines = [ln for ln in out.splitlines() if TAG in ln]
     assert lines, f"no result line (rc={proc.returncode}):\n{out[-2000:]}"
-    results = json.loads(lines[-1].split(TAG, 1)[1])
+    return json.loads(lines[-1].split(TAG, 1)[1])
+
+
+# Worlds mirror ChromeDriver: pre_* steps stand in for the page's own scripts and the
+# clipboard round trips need the page's world (captureText runs main-world in the driver);
+# every other core call is isolated, as call_core does by default.
+def _chrome_world_main(step_id, expr):
+    return step_id.startswith("pre_") or expr is CLIP_ROUNDTRIP or (
+        isinstance(expr, Call) and expr.name == "captureText"
+    )
+
+
+def _run_chrome(profile_dir):
+    from patchright.sync_api import sync_playwright
+
+    from subllm.drivers.chatgpt_web import chrome
+
+    results = {}
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir), channel="chrome", headless=True
+        )
+        try:
+            ctx.route("**/*", lambda route: route.abort())
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            for fixture, steps in GROUPS:
+                page.goto("about:blank")
+                page.set_content((FIXTURES / fixture).read_text())
+                for step_id, expr in steps:
+                    main = _chrome_world_main(step_id, expr)
+                    try:
+                        if isinstance(expr, Call):
+                            results[step_id] = chrome.call_core(page, expr.name, *expr.args, main_world=main)
+                        else:
+                            results[step_id] = page.evaluate(
+                                expr.replace("$CORE", CORE.read_text()), isolated_context=not main
+                            ) if "$CORE" in expr else page.evaluate(expr, isolated_context=not main)
+                    except Exception as e:
+                        results[step_id] = {"__error": str(e)}
+        finally:
+            ctx.close()
+    return results
+
+
+def _chrome_skip_reason():
+    try:
+        import patchright.sync_api  # noqa: F401
+    except ImportError:
+        return "patchright is not installed"
+    from subllm.drivers.chatgpt_web import chrome
+
+    if chrome._chrome_executable() is None:
+        return "Google Chrome is not installed"
+    return None
+
+
+@pytest.fixture(scope="module", params=["ego", "chrome"])
+def r(request, tmp_path_factory):
+    if request.param == "ego":
+        if not shutil.which("ego-browser"):
+            pytest.skip("ego-browser is not on PATH")
+        results = _run_ego()
+    else:
+        reason = _chrome_skip_reason()
+        if reason:
+            pytest.skip(reason)
+        results = _run_chrome(tmp_path_factory.mktemp("chrome-profile"))
     errors = {k: v["__error"] for k, v in results.items() if isinstance(v, dict) and "__error" in v}
     assert not errors, errors
     return results
@@ -404,3 +475,68 @@ def test_image_probe_excludes_icon_and_user_image(r):
     assert len({user_img, icon, big}) == 3
     assert r["image_probe"]["images"] == [big]
     assert "PINEAPPLE" in r["image_probe"]["text"]
+
+
+def test_chrome_image_fetch_writes_the_fixture_bytes(tmp_path_factory):
+    """Chrome-only: the driver's real _FETCH_JS (main world) returns the image bytes."""
+    reason = _chrome_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    from patchright.sync_api import sync_playwright
+
+    from subllm.drivers.chatgpt_web import chrome
+
+    html = (FIXTURES / "synthetic-completed-image.html").read_text()
+    big = re.findall(r'<img[^>]*? src="([^"]+)"', html)[2]
+    m = re.match(r"data:image/png;base64,(.+)$", big)
+    assert m, "the fixture's big image must be a PNG data: URL"
+    expected = base64.b64decode(m.group(1), validate=True)
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(tmp_path_factory.mktemp("chrome-profile")), channel="chrome", headless=True
+        )
+        try:
+            ctx.route("**/*", lambda route: route.abort())
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto("about:blank")
+            page.set_content(html)
+            page.evaluate(DECODE_IMAGES, isolated_context=False)
+            src = chrome.call_core(page, "turnStatus", KEY, None)["images"][0]
+            assert src == big
+            b64 = page.evaluate(chrome._FETCH_JS % json.dumps(src), isolated_context=False)
+        finally:
+            ctx.close()
+    got = base64.b64decode(b64, validate=True)
+    assert got == expected
+    assert got.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_chrome_capture_text_needs_the_main_world_through_call_core(tmp_path_factory):
+    """Chrome-only: the page's Copy handler lives in the main world, so call_core's
+    main_world flag decides whether captureText sees it."""
+    reason = _chrome_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    from patchright.sync_api import sync_playwright
+
+    from subllm.drivers.chatgpt_web import chrome
+
+    html = (FIXTURES / COMPLETED).read_text()
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(tmp_path_factory.mktemp("chrome-profile")), channel="chrome", headless=True
+        )
+        try:
+            ctx.route("**/*", lambda route: route.abort())
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            out = {}
+            for main in (True, False):
+                page.goto("about:blank")
+                page.set_content(html)
+                page.evaluate(FAKE_CLIPBOARD, isolated_context=False)
+                page.evaluate(COPY_VIA_WRITE_TEXT, isolated_context=False)
+                out[main] = chrome.call_core(page, "captureText", None, main_world=main)
+        finally:
+            ctx.close()
+    assert out[True] == {"text": "**md** PINEAPPLE", "format": "markdown"}
+    assert out[False]["format"] == "plain"
