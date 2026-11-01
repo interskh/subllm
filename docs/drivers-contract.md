@@ -52,7 +52,7 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
     exactly once and not answer with SVG/HTML/code.
   - `references` become `-i <absolute path>` pairs before `--` (absolute because
     the cwd is the throwaway work dir). `CodexLLM.generate_image` checks each
-    one before the subprocess starts (readable regular file, no ',' because clap
+    one before the subprocess starts (readable regular file, no ',' because clap may
     splits `-i` values on commas; ClientError otherwise). codex itself ignores a
     missing `-i` file silently (verified on codex-cli 0.166.0), so
     `run_codex_exec(images=...)` callers must validate themselves.

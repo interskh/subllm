@@ -96,7 +96,7 @@ class CodexLLM(BaseLLM, ImageGenerator):
         refs: list[Path] = []
         for r in references:
             # Every check here runs before codex starts: codex ignores a missing
-            # or unreadable -i file silently, and clap splits -i values on ','.
+            # or unreadable -i file silently, and clap may split -i values on ",".
             try:
                 p = Path(r).expanduser()
                 ok = p.is_file() and os.access(p, os.R_OK)
