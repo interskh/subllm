@@ -106,3 +106,8 @@
 - Sanitizer/test agreement: sanitize.py still emits `g-p-` + 32 zeros; the privacy scan now treats that all-zero id as synthetic (`g-p-(?!0{32})[0-9a-f]{32}`). New test runs the sanitizer on user/project tokens and asserts the output passes every scan check. The test execs sanitize.py source instead of importing it, so nothing writes a `__pycache__` into fixtures.
 - Mutations: drop the zone clause -> caught; drop the whole filter (count every Remove) -> caught (2 tests x 2 substrates).
 - Deferred: a pill that is BOTH inside the attachment zone and named "Remove x" would still count (never observed).
+- Deferred (Codex re-check of round 2): on a layout without `[data-composer-attachments]` (legacy), a leftover attachment whose name has no extension (e.g. `README`) is not counted, so the stale-draft check would miss it. Every redesign capture has the zone; references already fail closed on the legacy layout.
+
+## Run status
+
+Whole-run gate: PASS after 2 fix cycles (bf4580b, 9779ae4); reviewer and Codex re-checks confirm every gate finding fixed. Full suite at 9779ae4: 783 passed, 147 skipped; browser 134 passed; tripwire log empty. Live: one `subllm image --route web --ref` call saved exactly one image that follows the reference (blue star from an orange-star reference). Privacy gate: the leaked sidebar ids in the first version of the reference fixture were rewritten out of branch history before merge.
