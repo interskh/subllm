@@ -74,7 +74,7 @@
   const MESSAGE_SEL = [
     "[data-content-search-unit-key$=':user']", "[data-message-author-role=user]",
     "[data-user-message-bubble]", "[data-conversation-role=user]",
-    "[data-markdown-text-style='assistant-message']", ".markdown", "[data-message-author-role=assistant]",
+    "[data-markdown-text-style='assistant-message']", ".markdown",
   ].join(", ");
   const errorText = (root) => {
     for (const el of q(root, "div, span, p, [role=alert]")) {

@@ -434,6 +434,11 @@ def _run_variant(tmp_path, *swaps):
 
 
 _TYPE_OK = "    type: async () => { __typed.done = true; },"
+_FAST_CLOCK = (
+    "const __typed",
+    "let __t = Date.now(); Date.now = () => (__t += 1000);\n"
+    "const __st = setTimeout; globalThis.setTimeout = (f) => __st(f, 0);\nconst __typed",
+)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
@@ -456,7 +461,7 @@ def test_composer_mismatch_leaves_record_and_never_presses_enter(tmp_path):
 def test_never_loaded_page_is_client_error_not_a_login_wall(tmp_path):
     kp, out, results = _run_variant(
         tmp_path,
-        ("const __typed", "let __t = Date.now(); Date.now = () => (__t += 1000);\nconst __typed"),
+        _FAST_CLOCK,
         ("logged_in: true, login_prompt: false", "logged_in: false, login_prompt: false"),
         ("handOff: async () => {}", "handOff: async () => { console.log('HANDOFF'); }"),
     )
@@ -469,11 +474,27 @@ def test_never_loaded_page_is_client_error_not_a_login_wall(tmp_path):
 def test_login_prompt_is_a_human_action_with_hand_off(tmp_path):
     kp, out, results = _run_variant(
         tmp_path,
+        _FAST_CLOCK,
         ("logged_in: true, login_prompt: false", "logged_in: false, login_prompt: true"),
         ("handOff: async () => {}", "handOff: async () => { console.log('HANDOFF'); }"),
     )
     assert not kp.exists() and "HANDOFF" in out
     assert results[0]["kind"] == "human_action"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_login_control_before_session_hydrates_is_not_a_hand_off(tmp_path):
+    kp, out, results = _run_variant(
+        tmp_path,
+        ("const __typed", "let __polls = 0;\nconst __typed"),
+        (
+            "return { logged_in: true, login_prompt: false,",
+            "return __polls++ < 2 ? { logged_in: false, login_prompt: true } : { logged_in: true, login_prompt: false,",
+        ),
+        ("handOff: async () => {}", "handOff: async () => { console.log('HANDOFF'); }"),
+    )
+    assert "HANDOFF" not in out
+    assert len(results) == 1 and "chat opened before the send key" in results[0]["detail"]
 
 
 def test_fcntl_is_not_imported_at_module_level():

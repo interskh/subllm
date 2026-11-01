@@ -611,7 +611,9 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   is a `SendUnconfirmedError`, never a plain `ClientError` for a possibly sent
   prompt. The `/c/` check still runs BEFORE the composer check so the detail
   reads "chat opened before the send key".
-- NOT-READY PAGE. A page that never shows the composer is a `human_action` only
+- NOT-READY PAGE. The script waits up to 45 s for `logged_in` or `challenge`; a
+  login control alone does not end the wait (it can show before the session
+  loads). A page that never shows the composer is a `human_action` only
   when `state()` reports `challenge` or `login_prompt`; otherwise it is a
   `ClientError` ("chatgpt.com did not become ready") and no hand-off happens.
 - EMPTY PROMPT. A prompt that is empty after normalization is a `ClientError`

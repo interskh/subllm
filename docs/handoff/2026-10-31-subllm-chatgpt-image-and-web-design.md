@@ -207,3 +207,10 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 
 **Deferred** (out of scope per the orchestrator)
 - flock OSError other than EWOULDBLOCK; `WebTextResult.conversation_url` typing (str vs None); `finish()` after an error.
+
+### Slice 2 gate fixes, cycle 2
+
+- Whole-run reviewer re-check of 9e15e78: PASS. Codex re-check: its 3 findings fixed; one new MAJOR: excluding all of `[data-message-author-role=assistant]` hid a legacy error alert placed beside the answer body, so partial text could return as success. Fix: `errorText` excludes answer bodies only (`.markdown`, `assistant-message`), not the assistant wrapper. New fixture `synthetic-legacy-error-alert.html` + browser test (failed before the fix, passes after).
+- Reviewer residual risk fixed: the state loop no longer ends on `login_prompt` (a login control can flash before the session hydrates and would have handed off a logged-in space). It waits for `logged_in`/`challenge`; `login_prompt` only classifies after the 45 s wait. Node-harness test for the flash case; mutant (break on login_prompt) caught.
+- Harness tests that run out the 45 s wait now also make `setTimeout` immediate (ego tests 50 s -> 10 s).
+- Supersedes the cycle-1 line "The wait loop also exits early on `login_prompt`".

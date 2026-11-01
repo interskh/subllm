@@ -151,6 +151,9 @@ GROUPS = [
     ("synthetic-completed-error-words.html", [
         ("error_words_probe", SETTLED % (json.dumps(KEY), json.dumps(KEY))),
     ]),
+    ("synthetic-legacy-error-alert.html", [
+        ("legacy_alert_probe", SETTLED % (json.dumps(None), json.dumps(None))),
+    ]),
 ]
 
 
@@ -382,3 +385,8 @@ def test_prompt_and_answer_starting_with_unknown_error_are_not_an_error_dialog(r
     p = r["error_words_probe"]
     assert p["error_dialog"] is None
     assert p["done"] is True
+
+
+def test_legacy_error_alert_beside_the_answer_body_is_an_error_dialog(r):
+    p = r["legacy_alert_probe"]
+    assert p["error_dialog"] and p["error_dialog"]["text"].startswith("Something went wrong while")

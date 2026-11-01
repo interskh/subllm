@@ -41,7 +41,8 @@ try {
   const waitEnd = Date.now() + 45000;
   while (Date.now() < waitEnd) {
     st = await core("state");
-    if (st.logged_in || st.challenge || st.login_prompt) break;
+    // A login control can flash before the session hydrates, so it only classifies after the wait.
+    if (st.logged_in || st.challenge) break;
     await sleep(500);
   }
   if (!st) stop("client", "page state unavailable");
