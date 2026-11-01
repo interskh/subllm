@@ -12,10 +12,12 @@ Run:
     SUBLLM_LIVE=1 uv run pytest -m integration -k codex     # codex only
     SUBLLM_LIVE=1 uv run pytest -m integration -k claude    # claude only
     SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex image (spends quota)
+    SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # chatgpt.com web route
 
 Requirements:
     codex   -> `codex` logged in to your ChatGPT plan
     claude  -> `claude` logged in to your Pro/Max plan, plus `tmux`
+    chatgpt_web -> ego lite running with a manual chatgpt.com login; also needs SUBLLM_WEB=1
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ import zlib
 import pytest
 from pydantic import BaseModel
 
+from subllm.chatgpt_web import ChatGPTWebLLM
 from subllm.claude import ClaudeLLM
 from subllm.codex import CodexLLM
 from subllm.errors import QuotaError
@@ -144,3 +147,19 @@ def test_generate_image_writes_decodable_png(tmp_path):
         _assert_decodable_png(p)
     assert res.route == "codex"
     assert res.conversation_url is None and res.served_model is None
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SUBLLM_WEB"),
+    reason="chatgpt.com web route test; set SUBLLM_WEB=1 to run",
+)
+@pytest.mark.skipif(shutil.which("ego-browser") is None, reason="ego-browser not on PATH")
+def test_chatgpt_web_complete_result_round_trips_token():
+    # Spends a little ChatGPT Chat quota and leaves one regular chat in history.
+    token = "zorblax"
+    res = _live(lambda: ChatGPTWebLLM().complete_result(
+        f"Reply with exactly this one word and nothing else: {token}"
+    ))
+    assert token in res.text.lower(), f"token did not round-trip: {res.text!r}"
+    assert res.format in {"markdown", "plain"}
+    assert res.conversation_url.startswith("https://chatgpt.com/c/")

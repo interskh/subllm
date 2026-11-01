@@ -57,7 +57,6 @@ try {
     if (i < parts.length - 1) await page.keyboard.press("Shift+Enter");
   }
   await sleep(400);
-  if (!(await core("composerMatches", ARGS.prompt))) stop("client", "composer text does not match the prompt");
   const record = () => {
     fs.writeFileSync(KEYPRESS_FILE, "keypress");
     event({ phase: "keypress" });
@@ -66,6 +65,7 @@ try {
     record();
     stop("client", "chat opened before the send key; a send may have happened");
   }
+  if (!(await core("composerMatches", ARGS.prompt))) stop("client", "composer text does not match the prompt");
 
   record();
   await page.cdp("Page.bringToFront");

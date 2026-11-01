@@ -530,3 +530,80 @@ violate D-6 and its trust-dialog handling answers the wrong option here).
   account's email into the model's context: auth-derived, not
   owner-config-derived, but it is the one piece of owner identity in the
   session.
+
+
+## chatgpt_web (ChatGPT web route, text)
+
+Spec: `docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md`
+(D-3 to D-7, section 4.3). Python only. The route drives the official chatgpt.com
+web app in a real logged-in browser; it never calls `backend-api` directly.
+
+- PAGE CORE (D-3). All chatgpt.com knowledge lives in `page_core.js`, pure
+  functions run in the page through `evaluate`: `state()` (logged_in, challenge,
+  mode_surface, layout, busy), `selectMode`, `composerMatches(prompt)`,
+  `acceptance()` (pending | accepted | rejected, turn_key, conversation_url),
+  `turnStatus(turn_key)`, `captureText(turn_key)` (Copy-button markdown, falls
+  back to `innerText`), `servedModel(turn_key)`. The core never generates input.
+- INPUT (D-3a). Bring the tab to front (`Page.bringToFront`), type with per-key
+  events and a 40 ms delay, send with Enter. Never `insertText` or paste: a
+  filled-without-keys composer was rejected by the server (403 on `prepare`).
+  Accepted means the URL changed from no conversation id to `/c/<uuid>`. "Unknown
+  error" while the URL is still a `local-chatgpt:` placeholder is a rejection.
+- PROMPT NORMALIZATION. Before generating the script: CRLF and CR become LF, tab
+  becomes 4 spaces (`keyboard.type` presses Enter for CR and moves focus for tab).
+  LF is typed as Shift+Enter.
+- SCRIPT (D-4). One Node script per call: a preamble (`ARGS`, `KEYPRESS_FILE`,
+  `CORE` as JSON literals) plus the `ego_run.js` body, piped to `ego-browser
+  nodejs` on stdin. The runtime inherits no cwd or env. The task space is fresh
+  and named `subllm-chatgpt-<8 hex>`. The script calls `finish({keep: []})` on
+  every outcome except `human_action`, where it calls `handOff()` and leaves the
+  space open.
+- DETECTION (D-4). `ego-browser` on PATH, `ego-browser --version` exits 0, a
+  no-browser health script round-trips a sentinel. Then `ego-browser skill` must
+  report usage guide major `2`; any other major is a `ClientError` naming both
+  versions, never a fallback, even under `browser="auto"`.
+- ONE SEND PER CALL (D-6). Every call starts in a new chat (confirm no `/c/` in
+  the URL before typing). No retry anywhere. Phases split at the Enter keypress
+  and at server acceptance: before the key, failures are `ClientError`,
+  `QuotaError` or `HumanActionRequired`; after the key, only a positive rejection
+  is `ClientError`; everything else that does not end in a result is
+  `SendUnconfirmedError` (with the conversation URL when accepted). Calls are
+  serialized per machine by an exclusive `flock` on
+  `~/.local/share/subllm/chatgpt-web.lock`; waiting longer than `timeout_s`
+  is a `ClientError`.
+- ERRORS (D-7).
+
+  | Condition | Error |
+  |---|---|
+  | usage-limit dialog before the key | `QuotaError` |
+  | send rejected before acceptance | `ClientError`, no resend |
+  | any other failure after the key | `SendUnconfirmedError` |
+  | logged out, challenge | `HumanActionRequired` (CLI exit 3) |
+  | Work mode, mode unconfirmed, browser missing, script crash before send, guide mismatch | `ClientError` |
+  | completed turn with empty text | `OutputError` |
+
+- RESULT PROTOCOL (4.3). The script prints tagged lines; the parser reads stdout
+  and stderr.
+
+  ```
+  SUBLLM_EVENT {"phase": "keypress"}
+  SUBLLM_EVENT {"phase": "accepted", "conversation_url": "https://chatgpt.com/c/<id>"}
+  SUBLLM_EVENT {"phase": "rejected"}
+  SUBLLM_RESULT {"ok": true, "text": "...", "format": "markdown"|"plain", "images": [], "served_model": "..."|null, "conversation_url": "..."}
+  SUBLLM_RESULT {"ok": false, "kind": "human_action"|"quota"|"client"|"output"|"downgrade", "detail": "...", "conversation_url": ..., "text": ..., "served_model": ...}
+  ```
+
+  `rejected` is emitted when `acceptance()` reports a rejection, and Python maps a
+  `client` failure with that event to "send rejected; not resent". Exactly one
+  `SUBLLM_RESULT` per run; the exit status is authoritative, so an `ok: true` line
+  with a non-zero exit is not trusted.
+- DURABLE KEYPRESS RECORD. Before the Enter keypress (and before stopping on an
+  early send, see below) the script writes `KEYPRESS_FILE` synchronously. The
+  parent reads that file, not the stream, to decide whether a send may have
+  happened. File present and no usable result is `SendUnconfirmedError`; file
+  absent and no result is `ClientError` with the stderr tail.
+- EARLY SEND. After typing, the script checks for a `/c/` URL BEFORE the composer
+  text check: if the page already opened a chat, a send may have happened, so it
+  writes the record and stops with "chat opened before the send key". Checking
+  the composer first would see the emptied editor, fail without a record, and
+  make a sent prompt look unsent.

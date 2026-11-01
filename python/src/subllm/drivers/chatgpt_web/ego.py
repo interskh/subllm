@@ -14,9 +14,9 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
+from subllm.base import WebTextResult
 from subllm.errors import (
     ClientError,
     HumanActionRequired,
@@ -30,14 +30,6 @@ _HERE = Path(__file__).parent
 SUPPORTED_GUIDE_MAJOR = 2
 _LINE_RE = re.compile(r"^SUBLLM_(EVENT|RESULT) (.*)$", re.MULTILINE)
 _GUIDE_RE = re.compile(r"usage guide v(\d+)\.(\d+)\.(\d+)")
-
-
-@dataclass(frozen=True)
-class EgoTextResult:
-    text: str
-    format: str
-    served_model: str | None
-    conversation_url: str | None
 
 
 def lock_path() -> Path:
@@ -129,7 +121,7 @@ class EgoDriver:
             )
         self._guide_ok = True
 
-    def run_text(self, prompt: str, *, timeout_s: float) -> EgoTextResult:
+    def run_text(self, prompt: str, *, timeout_s: float) -> WebTextResult:
         prompt = normalize_prompt(prompt)
         path = lock_path()
         try:
@@ -151,7 +143,7 @@ class EgoDriver:
         finally:
             fd.close()
 
-    def _run_locked(self, prompt: str, timeout_s: float) -> EgoTextResult:
+    def _run_locked(self, prompt: str, timeout_s: float) -> WebTextResult:
         tmpdir = Path(tempfile.mkdtemp(prefix="subllm-chatgpt-"))
         keypress = tmpdir / "keypress"
         try:
@@ -188,7 +180,7 @@ def _txt(v) -> str:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
-def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) -> EgoTextResult:
+def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) -> WebTextResult:
     events, results = parse_output(out + "\n" + err)
     res = results[0] if len(results) == 1 else None
     url = None
@@ -221,7 +213,7 @@ def _map(out: str, err: str, code: int | None, sent: bool, expired: str | None) 
         )
     if res.get("ok"):
         if code == 0:
-            return EgoTextResult(
+            return WebTextResult(
                 text=res.get("text") or "",
                 format=res.get("format") or "plain",
                 served_model=res.get("served_model"),

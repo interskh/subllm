@@ -1,7 +1,8 @@
 """Minimal CLI for smoke-testing both clients (and shell-out from non-Python).
 
     subllm complete       --client codex|claude [--model M] [--effort E] [PROMPT]
-    subllm complete-json  --client codex|claude [--schema schema.json] [PROMPT]
+    subllm complete       --client chatgpt-web [--browser auto|ego|chrome] [PROMPT]
+    subllm complete-json  --client codex|claude|chatgpt-web [--schema schema.json] [PROMPT]
     subllm web-agent      --client codex|claude --model M [--tools web|none]
                           [--schema schema.json] [--timeout S] [PROMPT]
     subllm image          --route codex -o OUT_DIR [PROMPT]
@@ -10,7 +11,9 @@ PROMPT is read from the argument, or stdin when omitted / '-'.
 
 `web-agent` is the machine-facing entry point: one JSON document on stdout on
 success, and a typed error JSON on stdout (never stderr) on failure. The older
-subcommands keep their human-facing behaviour, errors on stderr.
+subcommands keep their human-facing behaviour, errors on stderr. For
+`--client chatgpt-web` the stderr line is `error: <Type>: <message>`, and a
+HumanActionRequired (log in, solve a challenge) exits 3.
 """
 from __future__ import annotations
 
@@ -20,10 +23,12 @@ import sys
 
 from subllm.errors import (
     ClientError,
+    HumanActionRequired,
     IsolationError,
     OutputError,
     QuotaError,
     RegionError,
+    SendUnconfirmedError,
     SubllmError,
 )
 from subllm.webagent import json_safe, schema_model_from_json_schema
@@ -38,11 +43,14 @@ def _read_prompt(arg: str | None) -> str:
 def _build_client(name: str, args: argparse.Namespace):
     if name == "codex":
         from subllm.codex import CodexLLM
-        return CodexLLM(model=args.model, reasoning_effort=args.effort)
+        return CodexLLM(model=args.model, reasoning_effort=args.effort or "medium")
     if name == "claude":
         from subllm.claude import ClaudeLLM
         return ClaudeLLM(model=args.model)
-    raise SystemExit(f"unknown client: {name!r} (expected codex|claude)")
+    if name == "chatgpt-web":
+        from subllm.chatgpt_web import ChatGPTWebLLM
+        return ChatGPTWebLLM(browser=args.browser or "auto")
+    raise SystemExit(f"unknown client: {name!r} (expected codex|claude|chatgpt-web)")
 
 
 def _build_web_agent_client(name: str, model: str | None):
@@ -200,9 +208,10 @@ def main(argv: list[str] | None = None) -> int:
 
     for cmd in ("complete", "complete-json"):
         p = sub.add_parser(cmd)
-        p.add_argument("--client", required=True, choices=["codex", "claude"])
+        p.add_argument("--client", required=True, choices=["codex", "claude", "chatgpt-web"])
         p.add_argument("--model", default=None)
-        p.add_argument("--effort", default="medium")
+        p.add_argument("--effort", default=None)
+        p.add_argument("--browser", default=None, choices=["auto", "ego", "chrome"])
         p.add_argument("--schema", default=None, help="JSON-schema file (complete-json)")
         p.add_argument("prompt", nargs="?", default=None)
 
@@ -221,6 +230,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         args = parser.parse_args(argv)  # argparse exits(2) on bad args/choices
+        if args.cmd in ("complete", "complete-json"):
+            if args.client == "chatgpt-web":
+                for flag in ("model", "effort"):
+                    if getattr(args, flag) is not None:
+                        parser.error(f"--{flag} is not supported with --client chatgpt-web")
+            elif args.browser is not None:
+                parser.error("--browser is only supported with --client chatgpt-web")
         if args.cmd == "web-agent":
             return _run_web_agent(args)
         if args.cmd == "image":
@@ -242,8 +258,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
         return 0
     except SubllmError as e:
-        sys.stderr.write(f"error: {e}\n")
-        return 1
+        if getattr(args, "client", None) != "chatgpt-web":
+            sys.stderr.write(f"error: {e}\n")
+            return 1
+        line = f"error: {type(e).__name__}: {_safe_str(e)}"
+        if isinstance(e, SendUnconfirmedError) and e.conversation_url:
+            line += f" (conversation: {e.conversation_url})"
+        sys.stderr.write(line + "\n")
+        return 3 if isinstance(e, HumanActionRequired) else 1
     except SystemExit as e:
         # argparse (bad args/choices) or _build_client raised SystemExit.
         return e.code if isinstance(e.code, int) else 2

@@ -7,8 +7,9 @@ cross-language subprocess contract.
 
 You are implementing **subllm**: a Python library that runs LLM requests
 (summarize / search-and-summarize) through flat-rate coding subscriptions via the
-**genuine official clients** — `codex exec` and interactive `claude` driven over
-tmux. No per-token API. No proxy.
+**genuine official clients** — `codex exec`, interactive `claude` driven over
+tmux, and the official chatgpt.com web app driven in a real logged-in browser
+through that browser's own automation interface. No per-token API. No proxy.
 
 ## Read first (in order)
 
@@ -22,7 +23,10 @@ tmux. No per-token API. No proxy.
 
 Client-native execution only. NEVER build or use a subscription-to-API HTTP proxy
 (token wrapped behind an OpenAI-compatible endpoint) — ban risk. subllm only
-drives the real official CLIs as subprocesses.
+drives the real official CLIs as subprocesses, plus the official chatgpt.com web
+app in a real logged-in browser via that browser's own automation interface.
+Requests go only through the page's own UI: no HTTP server in subllm and no
+`backend-api` replay.
 
 ## Web-agent mode (shipped, Python only)
 

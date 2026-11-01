@@ -61,6 +61,14 @@ class ImageResult:
     served_model: str | None
 
 
+@dataclass(frozen=True)
+class WebTextResult:
+    text: str
+    format: Literal["markdown", "plain"]
+    served_model: str | None
+    conversation_url: str
+
+
 class ImageGenerator(ABC):
     @abstractmethod
     def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult: ...

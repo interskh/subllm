@@ -10,9 +10,10 @@ that already codes against `complete` / `complete_json` / `complete_json_schema`
 can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one with
 no call-site changes.
 
-**Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI). 56 hermetic
-tests passing, plus a 6-test opt-in live suite — both the codex and claude paths
-verified end-to-end against live subscriptions.
+**Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), plus an
+opt-in ChatGPT web route for text (`ChatGPTWebLLM`). 451 hermetic tests passing,
+plus an opt-in live suite — the codex and claude paths verified end-to-end against
+live subscriptions.
 
 ## What it does
 
@@ -174,6 +175,36 @@ raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
 `CodexLLM` implements the `ImageGenerator` interface.
 
+### ChatGPT web route (ego lite)
+
+`ChatGPTWebLLM` sends a prompt through the official chatgpt.com web app, open in
+a real, logged-in ego lite browser. It spends **Chat** quota only. It is opt-in:
+nothing else in subllm uses it, and `FallbackLLM` only reaches it if you list it.
+Browser automation of the web app carries account risk (spec A-1); use an
+account you can afford to put at risk.
+
+Each call opens a regular chat that stays in your ChatGPT history. Your account's
+memory and custom instructions can colour answers (the web analogue of Codex's
+AGENTS.md pollution).
+
+Prerequisites: ego lite installed and running, and one manual login to
+chatgpt.com in its profile. If the page shows a login wall or a challenge,
+`HumanActionRequired` is raised and the space is handed to you.
+
+```python
+from subllm import ChatGPTWebLLM
+
+llm = ChatGPTWebLLM()                       # browser="auto", plan="plus"
+text = llm.complete("Summarize ...")
+res = llm.complete_result("Summarize ...")  # WebTextResult
+print(res.format, res.served_model, res.conversation_url)  # https://chatgpt.com/c/<id>
+data = llm.complete_json("Return {...}")    # dict, prompt-instructed JSON
+```
+
+Only `mode="default"` is available; the Chrome driver is not available yet, so
+`browser="auto"` currently means ego lite. A call makes exactly one send and never
+retries; calls are serialized per machine by a file lock.
+
 ### ClaudeLLM (fallback)
 
 ```python
@@ -327,6 +358,7 @@ A minimal CLI for smoke-testing and shell-out from non-Python projects:
 ```bash
 subllm complete       --client codex|claude  [--model M] [--effort E] [PROMPT]
 subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
+subllm complete       --client chatgpt-web [--browser auto|ego] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
 subllm image          --route codex -o OUT_DIR [PROMPT]
@@ -339,6 +371,11 @@ exit code. Example:
 ```bash
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
+
+With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
+`--browser` is rejected for the other clients. Errors print
+`error: <Type>: <message>` to stderr and exit 1; `HumanActionRequired` exits 3
+so a wrapper can prompt the user to log in.
 
 `image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
@@ -392,7 +429,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (390 passed, 11 skipped)
+uv run pytest                 # no subscription, no network (451 passed, 37 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -409,6 +446,7 @@ SUBLLM_LIVE=1 uv run pytest -m integration            # codex + claude
 SUBLLM_LIVE=1 uv run pytest -m integration -k codex   # codex only
 SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
 SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex image (spends quota)
+SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # ego lite + chatgpt.com login
 ```
 
 Requires `codex` logged in to a ChatGPT plan; the claude tests additionally need
@@ -490,6 +528,9 @@ npm --prefix ts test         # run the vitest suite
 | `RegionGuard` | `(allowed_regions=None, blocked_regions=None, lookup=default_lookup, ttl_s=300.0, on_lookup_failure="block")` — pass exactly one of allowed/blocked |
 | `DryRunLLM` | `()` |
 | `BaseLLM` | abstract base; subclass to add a client |
+| `ChatGPTWebLLM` | `(mode="default", plan="plus", browser="auto", region_guard=None, timeout_s=None)` — `timeout_s` defaults to 600; one send per call, no retry |
+| `ChatGPTWebLLM.complete_result` | `(prompt) -> WebTextResult` |
+| `WebTextResult` | `text, format ("markdown"\|"plain"), served_model, conversation_url` (frozen) |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
 | `CodexLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry |
 | `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
@@ -510,6 +551,15 @@ All inherit `SubllmError`:
   answer. Hard stop, and **not** a `FallbackLLM` trigger — the other client is
   no safer.
 
+Chat web route only (`ChatGPTWebLLM`):
+
+- `HumanActionRequired` — a person must log in or solve a challenge before any
+  send (CLI exit 3). Carries `.browser` and `.detail`.
+- `SendUnconfirmedError` — the send key was pressed but the outcome is unknown.
+  The prompt is **never resent**; `.conversation_url` (or `None`) shows where to look.
+- `QuotaError` from the web route is raised only before the send key. After the
+  key, the same dialog is a `SendUnconfirmedError`.
+
 `CodexLLM`/`ClaudeLLM` retry only transient failures (`ClientError`/`OutputError`)
 within a single client with 1s/2s/4s backoff; cross-client failover is
 `FallbackLLM`'s job alone. **`run_web_task` never retries** (see above).
@@ -519,7 +569,10 @@ within a single client with 1s/2s/4s backoff; cross-client failover is
 Client-native execution only. subllm **never** builds or uses a
 subscription-to-API HTTP proxy (a token wrapped behind an OpenAI-compatible
 endpoint) — that rewrites request shapes, isn't client-native, and carries
-account-ban risk. It only ever drives the real official CLIs as subprocesses.
+account-ban risk. It only ever drives the real official clients: the official CLIs as subprocesses, and the
+official chatgpt.com web app in a real logged-in browser through that browser's
+own automation interface. Requests go only through the page's own UI. subllm runs
+no HTTP server and replays no `backend-api` call.
 
 The egress filter web-agent mode runs for the claude client is **not** that
 proxy: it is a network-layer CONNECT filter that decides whether a TCP

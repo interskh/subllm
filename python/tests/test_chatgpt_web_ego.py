@@ -2,10 +2,12 @@ import fcntl
 import json
 import os
 import re
+import shutil
+import subprocess
 
 import pytest
 
-from subllm.drivers.chatgpt_web.ego import EgoDriver, build_script, lock_path
+from subllm.drivers.chatgpt_web.ego import EgoDriver, build_script, lock_path, parse_output
 from subllm.errors import (
     ClientError,
     HumanActionRequired,
@@ -332,3 +334,42 @@ def test_space_name_differs_per_call(ego):
         names.append(re.search(r'"space": "([^"]*)"', s).group(1))
     assert all(re.fullmatch(r"subllm-chatgpt-[0-9a-f]{8}", n) for n in names)
     assert names[0] != names[1]
+
+
+_FAKE_RUNTIME = r"""
+const __typed = { done: false };
+const __page = {
+  url: async () => (__typed.done ? "https://chatgpt.com/c/fake-id" : "https://chatgpt.com/"),
+  goto: async () => {},
+  click: async () => {},
+  cdp: async () => {},
+  keyboard: {
+    type: async () => { __typed.done = true; },
+    press: async () => { console.log("PRESSED_ENTER"); },
+  },
+  evaluate: async (expr) => {
+    if (expr.startsWith("!!document")) return true;
+    const call = expr.slice(-80);
+    if (call.includes(").state(")) return { logged_in: true, mode_surface: "chat", busy: false, quota: false };
+    if (call.includes(").composerMatches(")) return false;
+    throw new Error("unexpected evaluate: " + call);
+  },
+};
+const taskSpace = async () => ({ page: () => __page, finish: async () => {}, handOff: async () => {} });
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_early_send_during_typing_writes_record_and_reports_chat_opened(tmp_path):
+    kp = tmp_path / "keypress"
+    body = build_script("hi", space="subllm-chatgpt-abcd1234", timeout_ms=1000, keypress_file=str(kp))
+    prog = tmp_path / "run.js"
+    prog.write_text(_FAKE_RUNTIME + "(async () => {\n" + body + "\n})();\n")
+    p = subprocess.run(["node", str(prog)], capture_output=True, text=True, timeout=60)
+    events, results = parse_output(p.stdout)
+    assert kp.exists()
+    assert {"phase": "keypress"} in events
+    assert "PRESSED_ENTER" not in p.stdout
+    assert len(results) == 1
+    assert results[0]["ok"] is False and results[0]["kind"] == "client"
+    assert "chat opened before the send key" in results[0]["detail"]

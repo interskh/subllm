@@ -156,3 +156,31 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 - `available()` is the ladder only (which, --version, health); a guide mismatch is only raised by `check_guide()` (spec D-4, never a fallback).
 - Legacy composer: the script checks for the ProseMirror editor and clicks `#prompt-textarea` otherwise (untested live).
 - Lock open, lock dir creation and template/core reads turn OSError into ClientError before anything is sent.
+
+### T3 — ChatGPTWebLLM, CLI, docs, live test
+
+**Decisions**
+- `WebTextResult` lives in base.py; `EgoDriver.run_text` returns it directly, `EgoTextResult` deleted.
+- `ChatGPTWebLLM` does not inherit `ImageGenerator` yet (slice 3). Driver is resolved lazily and cached; a failed resolve is not cached.
+- Order in `complete_result`: region guard, resolve (detection), `check_guide`, `run_text`, empty-text check. Guide mismatch raises even under "auto".
+- `complete_json` reuses codex `_JSON_INSTRUCTION` and `_parse_json_object` (imported, not copied); `complete_json_schema` stays the BaseLLM default.
+- ego_run.js: `isChat()` early-send check now runs before `composerMatches`, so an early send always leaves the keypress record.
+- CLI: `--effort` default is now None; "medium" is applied for codex in `_build_client`. Flag conflicts use `parser.error` (rc 2). chatgpt-web errors print `error: <Type>: <msg>`; HumanActionRequired exits 3; SendUnconfirmedError appends the conversation URL.
+- Live test is gated on SUBLLM_LIVE and SUBLLM_WEB and `ego-browser` on PATH.
+
+**Rejected**
+- Raising stub `generate_image` now: dead code until slice 3.
+- String-position test for the reorder: a node harness with a fake runtime runs the real generated script, so it proves behaviour. (Mutating the reorder is caught.)
+- Chrome fallback under "auto" for a guide mismatch: spec D-4 forbids it.
+
+**Assumptions**
+- `node` is on PATH for the harness test (it skips otherwise).
+- The README test count (451 passed, 37 skipped) is from the full run at the end of this task; re-measure if later tasks add tests.
+
+**Deferred**
+- `--mode`/`--plan` CLI flags and `mode != "default"` (slices 5); Chrome driver (slice 4); `plan` is validated and stored but not used yet.
+- The README "Layout" section was not updated for new files.
+
+**Touches**
+- New: python/src/subllm/chatgpt_web.py, tests/test_chatgpt_web_llm.py, tests/test_cli_chatgpt_web.py.
+- Changed: base.py (WebTextResult), __init__.py exports, cli.py (shared surface: `--effort` default, `--client`, `--browser`), ego.py, ego_run.js, test_chatgpt_web_ego.py, test_integration.py, README.md, AGENTS.md, docs/drivers-contract.md.
