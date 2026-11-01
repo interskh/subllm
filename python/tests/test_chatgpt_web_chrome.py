@@ -124,6 +124,7 @@ def chrome(monkeypatch, tmp_path):
             "turnStatus": DONE,
             "captureText": CAP,
             "servedModel": "gpt-x",
+            "attachments": {"count": 0, "pending": 0, "ready": 0, "failed": 0},
         }
         full.update(script or {})
         page = Page(full, log, **kw)
@@ -1145,7 +1146,7 @@ def test_empty_references_leave_the_flow_unchanged(chrome, tmp_path):
     out.mkdir()
     page = chrome({"turnStatus": IMG_DONE, "captureText": {"text": "", "format": "plain"}}, fetch={IMG_URL: b64(PNG_BYTES)})
     run_image(out)
-    assert "attachments" not in page.calls and "referenceInput" not in page.calls
+    assert page.calls.count("attachments") == 1 and "referenceInput" not in page.calls
     assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] == "set_input_files"]
 
 
@@ -1159,6 +1160,7 @@ def test_a_dip_in_readiness_resets_the_streak(chrome, tmp_path):
     [
         ([NO_CHIPS, chips(2, pending=1)], "1 of 2 ready"),
         ([NO_CHIPS, chips(1)], "1 of 2 ready"),
+        ([NO_CHIPS, {"count": 2, "pending": 0, "ready": 0, "failed": 0}], "0 of 2 ready"),
         ([NO_CHIPS, chips(3)], "did not finish uploading"),
         ([NO_CHIPS, NO_CHIPS], "0 of 2 ready"),
     ],
@@ -1190,6 +1192,18 @@ def test_composer_holding_attachments_is_refused(chrome, tmp_path):
     with pytest.raises(ClientError, match="already holds attachments"):
         attach_run(chrome, tmp_path, [chips(1)])
     assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] == "set_input_files"]
+
+
+@pytest.mark.parametrize("kind", ["text", "image"])
+def test_stale_draft_attachment_is_refused_on_every_send_without_references(chrome, tmp_path, kind):
+    page = chrome({"attachments": chips(1), "turnStatus": IMG_DONE})
+    with pytest.raises(ClientError, match="already holds attachments") as ei:
+        if kind == "text":
+            run()
+        else:
+            ChromeDriver().run_image("draw", tmp_path, timeout_s=5)
+    assert type(ei.value) is ClientError and typed(chrome.log) == []
+    assert not [e for e in chrome.log if isinstance(e, tuple) and e[0] in ("set_input_files", "click")]
 
 
 def test_set_input_files_exception_is_client_error_with_nothing_typed(chrome, tmp_path):

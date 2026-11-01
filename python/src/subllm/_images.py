@@ -21,6 +21,13 @@ def prepare_out_dir(out_dir: str | Path) -> Path:
     return dest
 
 
+def _is_image(head: bytes) -> bool:
+    return (
+        head.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+        or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+    )
+
+
 def resolve_references(
     references: Sequence[str | Path], *, forbid_comma: bool = False,
 ) -> list[Path]:
@@ -31,11 +38,16 @@ def resolve_references(
         try:
             p = Path(r).expanduser()
             ok = p.is_file() and os.access(p, os.R_OK)
+            if ok:
+                with open(p, "rb") as fh:
+                    head = fh.read(12)
             p = p.resolve()
         except (OSError, RuntimeError) as e:
             raise ClientError(f"cannot use reference image {r}: {e}") from e
         if not ok:
             raise ClientError(f"reference image is not a readable file: {r}")
+        if not _is_image(head):
+            raise ClientError(f"reference image is not a PNG, JPEG, WebP or GIF file: {r}")
         if forbid_comma and "," in str(p):
             raise ClientError(f"reference image path must not contain ',': {r}")
         refs.append(p)

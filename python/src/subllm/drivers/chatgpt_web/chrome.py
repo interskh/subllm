@@ -361,8 +361,6 @@ def _flow(
 def _attach_references(page, core, references: Sequence[str]) -> None:
     """Nothing is typed or sent until every reference has a finished chip; any doubt stops here."""
     want = len(references)
-    if core("attachments").get("count"):
-        raise _Stop("client", "composer already holds attachments")
     target = core("referenceInput", want)
     if not target:
         raise _Stop("client", "no image file input found in the composer")
@@ -373,7 +371,7 @@ def _attach_references(page, core, references: Sequence[str]) -> None:
         a = core("attachments")
         if a.get("failed"):
             raise _Stop("client", "reference image upload failed")
-        ready_reads = ready_reads + 1 if a.get("count") == want and a.get("pending") == 0 else 0
+        ready_reads = ready_reads + 1 if a.get("count") == want and a.get("pending") == 0 and a.get("ready") == want else 0
         if ready_reads >= 2:
             return
         if _clock() >= end:
@@ -444,6 +442,9 @@ def _flow_steps(
         if not after.get("logged_in") or after.get("mode_surface") != "chat" or after.get("busy"):
             raise _Stop("client", "Chat mode not confirmed after mode selection")
 
+    # A chip left in the draft by an earlier run would be sent along with this prompt.
+    if core("attachments").get("count"):
+        raise _Stop("client", "composer already holds attachments")
     if references:
         _attach_references(page, core, references)
 

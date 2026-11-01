@@ -162,7 +162,9 @@
     const pending = Math.max(bars, blobs);
     const zone = form.querySelector("[data-composer-attachments]");
     const failed = zone ? q(zone, "[role=alert]").length + (ATTACH_ERROR_RE.test(zone.innerText || "") ? 1 : 0) : 0;
-    return { count, pending, ready: Math.max(0, count - pending), failed };
+    // A chip is ready only on a positive signal: its preview has been swapped to a data: image.
+    const loaded = zone ? q(zone, "img").filter((i) => /^data:image\//.test(i.getAttribute("src") || "")).length : 0;
+    return { count, pending, ready: Math.max(0, Math.min(loaded, count - pending)), failed };
   };
 
   const acceptance = (url) => {

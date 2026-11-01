@@ -52,7 +52,7 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
     exactly once and not answer with SVG/HTML/code.
   - `references` become `-i <absolute path>` pairs before `--` (absolute because
     the cwd is the throwaway work dir). `CodexLLM.generate_image` checks each
-    one before the subprocess starts (readable regular file, no ',' because clap may
+    one before the subprocess starts (readable regular PNG/JPEG/WebP/GIF file, no ',' because clap may
     splits `-i` values on commas; ClientError otherwise). codex itself ignores a
     missing `-i` file silently (verified on codex-cli 0.166.0), so
     `run_codex_exec(images=...)` callers must validate themselves.
@@ -667,23 +667,33 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
 - REFERENCE IMAGES. `run_image(..., references=[abs paths])` (both substrates;
   empty = no change; a relative path is a `ClientError`; the files themselves are
   validated by the caller). After the Chat/mode checks and before the composer is
-  focused, the driver (1) requires `attachments().count == 0` (a draft already
-  holding attachments is refused), (2) asks `referenceInput(n)` for the composer
+  focused, the driver (1) requires `attachments().count == 0` (this runs on EVERY
+  send, text and image, with or without references, so a chip left behind by an
+  earlier run is never sent along; it is refused as a `ClientError`), (2) asks `referenceInput(n)` for the composer
   form's hidden `input[type=file]` (accept lists `image/*`, no `capture`, `multiple`
   when n > 1; it is marked `data-subllm-ref-input` because the ids are
   React-generated) and sets the files with `page.setInputFiles` (ego) /
   `set_input_files` (chrome), then (3) polls `attachments()` -> `{count, pending,
-  ready, failed}` until `count == n` and `pending == 0` on two consecutive reads.
-  Pending = an "Uploading ..." progressbar or a chip preview still on a `blob:` src.
+  ready, failed}` until `count == n`, `pending == 0` and `ready == n` on two
+  consecutive reads. Pending = an "Uploading ..." progressbar or a chip preview still
+  on a `blob:` src. Ready is a positive signal: the chip's preview `img` src starts
+  with `data:image/`; a chip with no such preview is never ready.
   The Send button stays enabled during upload, so this wait is the only guard.
-  A missing input, failed upload, wrong chip count or the bound (`60 + 15 * n` s)
-  is a `ClientError` before the keypress record: nothing was typed or sent, and the
-  call never falls back to sending without the references.
+  A missing input, wrong chip count or the bound (`60 + 15 * n` s) is a `ClientError`
+  before the keypress record: nothing was typed or sent, and the call never falls back
+  to sending without the references. `failed` is detected heuristically (an
+  `[role=alert]` or error-like text inside `[data-composer-attachments]`; the real
+  error UI was never observed), so an unrecognized failure is not a firm stop: it ends
+  as a `ClientError` at the attach timeout. The deadline starts after `setInputFiles`;
+  the outer budgets cover it. References need the redesign layout: with no composer
+  `input[type=file]` accepting `image/*` (the legacy layout) the run fails closed with
+  `ClientError` ("no image file input").
 - REFERENCE IMAGES, CLIENT LEVEL. `ChatGPTWebLLM.generate_image(prompt, out_dir, *,
   references=())` validates each reference after the region guard and the empty-prompt
   check and before `out_dir` is created or any browser is resolved: it must be a
-  readable regular file (`~` expanded, relative paths resolved against the cwd), else
-  a plain `ClientError`. It passes the resolved absolute paths, in order, to
+  readable regular file (`~` expanded, relative paths resolved against the cwd) whose
+  first bytes are PNG, JPEG, WebP or GIF (so a text, PDF or empty file is refused),
+  else a plain `ClientError`. It passes the resolved absolute paths, in order, to
   `run_image(references=...)`; an empty list passes nothing (today's call exactly).
   The codex route shares this check and additionally refuses a ',' in the path
   (a clap `-i` quirk that does not apply here). `subllm image --route web --ref FILE`

@@ -175,7 +175,7 @@ raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
 `references=[path, ...]` attaches image files to the prompt (codex `-i`), for
 example a character sheet the new image must match; a missing, unreadable or
-non-file path, or a path containing `,`, raises `ClientError` before codex starts. `CodexLLM` implements the `ImageGenerator`
+non-file path, a file that is not a PNG, JPEG, WebP or GIF, or a path containing `,`, raises `ClientError` before codex starts. `CodexLLM` implements the `ImageGenerator`
 interface.
 
 ### Choosing a route
@@ -322,9 +322,14 @@ non-image file, a failed write into `out_dir`, a timeout) raises `SendUnconfirme
 URL; the call is never retried, so quota is not spent twice.
 `references=[path, ...]` uploads image files into the chat composer before the
 prompt is typed, and the call waits until every upload has finished. A missing,
-unreadable or non-file path raises `ClientError` before any browser is touched, as
-does a composer that already holds attachments. If the upload does not finish
-within `60 + 15 * n` seconds the call raises `ClientError` and nothing is sent.
+unreadable or non-file path, or a file that is not a PNG, JPEG, WebP or GIF (checked
+by its first bytes), raises `ClientError` before any browser is touched. Every web
+call, with or without references, also raises `ClientError` and types nothing when
+the composer already holds an attachment (a leftover from an earlier run); that check
+runs after the page has loaded and any mode has been selected. If the upload does not
+finish within `60 + 15 * n` seconds the call raises `ClientError` and nothing is sent.
+References need the redesign layout of chatgpt.com; on the legacy layout the call
+fails closed with `ClientError` ("no image file input").
 
 ### ClaudeLLM (fallback)
 
@@ -681,7 +686,7 @@ npm --prefix ts test         # run the vitest suite
 | `ChatGPTWebLLM.generate_image` | `(prompt, out_dir, *, references=()) -> ImageResult` — one attempt, no retry, route `"web"` |
 | `CodexLLM.generate_image` | `(prompt, out_dir, *, references=()) -> ImageResult` — one attempt, no retry; `references` are files attached with codex `-i` |
 | `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
-| `ImageGenerator` | abstract base with `generate_image(prompt, out_dir)` |
+| `ImageGenerator` | abstract base with `generate_image(prompt, out_dir, *, references=())` |
 | `WebAgentResult` | `client, model, answer, trace, retrieved_urls, fetch_events_exposed, trace_complete, tools, client_version, duration_ms` (frozen; `.to_json()` gives the CLI document) |
 | `TraceEvent` | `kind, raw_type, raw, query=None, url=None, final_url=None, ok=None, result_urls=()` (frozen) |
 

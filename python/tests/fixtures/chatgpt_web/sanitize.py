@@ -35,6 +35,9 @@ UI_TEXT = {
     "Usage limit reached", "GPT-6", "GPT-5.6 Sol",
 }
 
+USER_TOKEN = re.compile(r"user-[A-Za-z0-9]{16,}")
+PROJECT_TOKEN = re.compile(r"g-p-[0-9a-f]{32}")
+ID_ATTR = re.compile(r'\s(data-[a-z-]*(?:user-id|account-id|project-id))="[^"]*"')
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
@@ -49,6 +52,10 @@ def sanitize(src: str, allow: set[str]) -> str:
     src = re.sub(r'\ssrc="(?!/cdn/assets/|blob:https://chatgpt.com/synthetic"|data:image/[a-z+.-]+;base64,AAAA")[^"]*"', ' src=""', src)
     src = re.sub(r'\s(srcset|alt|title|data-placeholder)="[^"]*"', "", src)
     src = re.sub(r'\s(data-[a-z-]*(?:name|email)[a-z-]*)="[^"]*"', r' \1="User"', src)
+
+    src = ID_ATTR.sub(r' \1="synthetic-id"', src)
+    src = USER_TOKEN.sub("user-synthetic", src)
+    src = PROJECT_TOKEN.sub("g-p-" + "0" * 32, src)
 
     ids: dict[str, str] = {}
 

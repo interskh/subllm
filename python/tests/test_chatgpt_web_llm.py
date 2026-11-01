@@ -512,7 +512,9 @@ def test_bad_reference_is_client_error_before_any_browser(egoimg, chrome, tmp_pa
     locked = tmp_path / "locked.png"
     locked.write_bytes(PNG_BYTES)
     locked.chmod(0)
-    bad = [tmp_path / "nope.png", tmp_path, "~no-such-user-xyz/ref.png"]
+    note = tmp_path / "note.txt"
+    note.write_text("not an image")
+    bad = [tmp_path / "nope.png", tmp_path, "~no-such-user-xyz/ref.png", note]
     if os.getuid() != 0:
         bad.append(locked)
     for ref in bad:

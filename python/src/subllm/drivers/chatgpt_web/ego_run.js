@@ -101,10 +101,11 @@ try {
     }
   }
 
+  // A chip left in the draft by an earlier run would be sent along with this prompt.
+  if ((await core("attachments")).count > 0) stop("client", "composer already holds attachments");
   if (ARGS.references.length) {
     // Nothing is typed or sent until every reference has a finished chip; any doubt stops here.
     const want = ARGS.references.length;
-    if ((await core("attachments")).count > 0) stop("client", "composer already holds attachments");
     const input = await core("referenceInput", want);
     if (!input) stop("client", "no image file input found in the composer");
     await page.setInputFiles(input.selector, ARGS.references);
@@ -113,7 +114,7 @@ try {
     for (;;) {
       const a = await core("attachments");
       if (a.failed) stop("client", "reference image upload failed");
-      readyReads = a.count === want && a.pending === 0 ? readyReads + 1 : 0;
+      readyReads = a.count === want && a.pending === 0 && a.ready === want ? readyReads + 1 : 0;
       if (readyReads >= 2) break;
       if (Date.now() >= attachEnd) stop("client", "reference images did not finish uploading (" + a.ready + " of " + want + " ready)");
       await sleep(250);

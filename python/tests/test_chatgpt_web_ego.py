@@ -369,6 +369,7 @@ const __page = {
     const call = expr.slice(-80);
     if (call.includes(").state(")) return { logged_in: true, login_prompt: false, mode_surface: "chat", busy: false, quota: false };
     if (call.includes(").composerMatches(")) return false;
+    if (call.includes(").attachments(")) return { count: 0, pending: 0, ready: 0, failed: 0 };
     throw new Error("unexpected evaluate: " + call);
   },
 };
@@ -1189,10 +1190,18 @@ def test_references_and_their_attach_bound_ride_in_the_script_args():
 
 
 @needs_node
-def test_empty_references_never_touch_the_attachment_surface(tmp_path):
+def test_empty_references_only_check_for_a_stale_draft(tmp_path):
     kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind="image")
-    assert not _attach_ops(log)
+    assert _attach_ops(log) == ["attachments"]
     assert results[0]["ok"] is True
+
+
+@needs_node
+@pytest.mark.parametrize("kind", ["text", "image"])
+def test_a_stale_draft_attachment_is_refused_on_every_send_without_references(tmp_path, kind):
+    kp, log, results, _ = _run_mode(tmp_path, [_DONE_PRO], mode="default", kind=kind, attach=[_chips(1)])
+    assert not kp.exists() and not [l for l in log if l.startswith(("click ", "type", "press", "setInputFiles"))]
+    assert results[0]["kind"] == "client" and "already holds attachments" in results[0]["detail"]
 
 
 @needs_node
@@ -1220,6 +1229,7 @@ def test_one_ready_read_is_not_enough_a_dip_resets_the_streak(tmp_path):
     [
         ([_NO_CHIPS, _chips(2, pending=1)], "1 of 2 ready"),
         ([_NO_CHIPS, _chips(1)], "1 of 2 ready"),
+        ([_NO_CHIPS, {"count": 2, "pending": 0, "ready": 0, "failed": 0}], "0 of 2 ready"),
         ([_NO_CHIPS, _chips(3)], "did not finish uploading"),
         ([_NO_CHIPS, _NO_CHIPS], "0 of 2 ready"),
     ],

@@ -145,6 +145,13 @@ SECOND_CHIP_UPLOADING = (
     " bar.setAttribute('aria-label', 'Uploading reference-2.png');"
     " zone.lastElementChild.querySelector('img').after(bar); return true; })()"
 )
+CHIP_WITHOUT_DATA_PREVIEW = (
+    "(() => { document.querySelectorAll('[data-composer-attachments] img')"
+    ".forEach(i => i.setAttribute('src', 'https://chatgpt.com/synthetic.png')); return true; })()"
+)
+CHIP_WITHOUT_IMG = (
+    "(() => { document.querySelectorAll('[data-composer-attachments] img').forEach(i => i.remove()); return true; })()"
+)
 ALERT_IN_ZONE = (
     "(() => { const a = document.createElement('div'); a.setAttribute('role', 'alert');"
     " document.querySelector('[data-composer-attachments]').appendChild(a); return true; })()"
@@ -341,6 +348,14 @@ GROUPS = [
         ("att_two_ready", call("attachments")),
         ("pre_second_uploading", SECOND_CHIP_UPLOADING),
         ("att_two_one_pending", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_other_src", CHIP_WITHOUT_DATA_PREVIEW),
+        ("att_other_src", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_no_img", CHIP_WITHOUT_IMG),
+        ("att_no_img", call("attachments")),
     ]),
     (READY, [
         ("pre_alert", ALERT_IN_ZONE),
@@ -899,6 +914,11 @@ def test_uploading_chip_is_counted_but_pending(r):
 
 def test_finished_chip_is_ready(r):
     assert r["att_ready"] == {"count": 1, "pending": 0, "ready": 1, "failed": 0}
+
+
+def test_a_chip_is_ready_only_with_a_data_image_preview(r):
+    assert r["att_other_src"] == {"count": 1, "pending": 0, "ready": 0, "failed": 0}
+    assert r["att_no_img"] == {"count": 1, "pending": 0, "ready": 0, "failed": 0}
 
 
 def test_two_chips_one_still_uploading(r):

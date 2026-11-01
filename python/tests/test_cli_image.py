@@ -284,8 +284,8 @@ def test_ref_flags_reach_codex(fake_bin, home, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ARGV_LOG", str(log))
     _stub(fake_bin, _WRITE)
     a, b = tmp_path / "a.png", tmp_path / "b.png"
-    a.write_bytes(b"A")
-    b.write_bytes(b"B")
+    a.write_bytes(PNG_BYTES)
+    b.write_bytes(PNG_BYTES)
     rc = main(["image", "--route", "codex", "-o", str(tmp_path / "o"),
                "--ref", str(a), "--ref", str(b), "x"])
     assert rc == 0

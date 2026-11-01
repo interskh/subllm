@@ -5,7 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, Sequence, TypeVar
 
 from subllm.errors import ClientError, OutputError
 
@@ -71,7 +71,9 @@ class WebTextResult:
 
 class ImageGenerator(ABC):
     @abstractmethod
-    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult: ...
+    def generate_image(
+        self, prompt: str, out_dir: str | Path, *, references: Sequence[str | Path] = (),
+    ) -> ImageResult: ...
 
 
 class DryRunLLM(BaseLLM):
