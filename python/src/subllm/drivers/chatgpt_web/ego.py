@@ -233,8 +233,12 @@ def _collect_images(res: dict, tmpdir: Path, dest: Path) -> ImageResult:
                 "chatgpt.com reported an image that is missing or not a PNG/WebP/JPEG file", conversation_url=url
             )
         files.append((p, ext))
+    try:
+        paths = save_numbered(files, dest)
+    except ClientError as e:
+        raise SendUnconfirmedError(f"image generated but not saved: {e}", conversation_url=url) from e
     return ImageResult(
-        paths=save_numbered(files, dest),
+        paths=paths,
         route="web",
         text=res.get("text") or "",
         conversation_url=url,

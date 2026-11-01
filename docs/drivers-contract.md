@@ -630,7 +630,7 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   path only if it is a regular, non-symlink file directly inside that temp dir,
   detects the format from magic bytes (PNG, WebP or JPEG; never from the name),
   validates every file before copying any, then copies each into `out_dir` with
-  exclusive create. A missing, empty-list, outside or non-image file after an ok
+  exclusive create. A missing, empty-list, outside or non-image file, or a failed copy into `out_dir`, after an ok
   result is a `SendUnconfirmedError` with the conversation URL.
 - IMAGE BUDGET. The subprocess budget is `timeout_s + 120 + 0.06 * len(prompt)`
   seconds, plus 60 s for image runs. Image runs are never retried.

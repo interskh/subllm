@@ -11,7 +11,7 @@ Run:
     SUBLLM_LIVE=1 uv run pytest -m integration -v
     SUBLLM_LIVE=1 uv run pytest -m integration -k codex     # codex only
     SUBLLM_LIVE=1 uv run pytest -m integration -k claude    # claude only
-    SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex + chatgpt.com image (spends quota)
+    SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex image (spends quota)
     SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # chatgpt.com web route
 
 Requirements:
@@ -183,6 +183,24 @@ def _assert_webp(path) -> tuple[int, int]:
     return size
 
 
+def _assert_jpeg(path) -> tuple[int, int]:
+    data = path.read_bytes()
+    assert data[:3] == b"\xff\xd8\xff", f"not a JPEG: {path.name}"
+    pos = 2
+    while pos + 4 <= len(data):
+        assert data[pos] == 0xFF, "bad JPEG marker"
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker in (0xC0, 0xC1, 0xC2):
+            h, w = struct.unpack(">HH", data[pos + 5:pos + 9])
+            assert w > 0 and h > 0, f"bad JPEG size: {(w, h)}"
+            return w, h
+        pos += 2 + struct.unpack(">H", data[pos + 2:pos + 4])[0]
+    raise AssertionError("no SOF marker in JPEG")
+
+
 @pytest.mark.skipif(
     not os.environ.get("SUBLLM_WEB"),
     reason="chatgpt.com web route test; set SUBLLM_WEB=1 to run",
@@ -198,7 +216,12 @@ def test_chatgpt_web_generate_image_writes_decodable_image(tmp_path):
     for p in res.paths:
         assert p.resolve().parent == out_dir.resolve(), f"outside out_dir: {p}"
         head = p.read_bytes()[:12]
-        size = _assert_webp(p) if head[:4] == b"RIFF" else _assert_decodable_png(p)
+        if head[:4] == b"RIFF":
+            size = _assert_webp(p)
+        elif head[:3] == b"\xff\xd8\xff":
+            size = _assert_jpeg(p)
+        else:
+            size = _assert_decodable_png(p)
         assert min(size) >= 256, f"image too small: {size}"
     assert res.route == "web"
     assert res.conversation_url.startswith("https://chatgpt.com/c/")

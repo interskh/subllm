@@ -283,3 +283,9 @@ implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
 - Slice-2 gate fixes on the live send path: both sends returned ok, which the driver accepts only with the keypress record present, so the record-before-typing path works live. No false rejection or error dialog was read during either image turn (prompt had no error words, so the prompt-exclusion case was not stressed). No login wall or hand-off; whether a login flash happened is not observable from the result.
 - A live completed-image DOM capture was not taken; `synthetic-completed-image.html` stands in.
 - Quota note: a T2 CLI mutant (web route built as `CodexLLM`) ran one real `codex exec` image call before it was killed; its file was deleted. Mutation runs on the route branch now need a stub `codex` on PATH.
+
+### Slice 3 gate fixes
+
+- `ego.py::_collect_images`: `save_numbered`'s `ClientError` (copy failure after the send) is wrapped as `SendUnconfirmedError` with the conversation URL, per D-6. `_images.py` and the codex route are unchanged. `test_image_existing_target_is_never_overwritten` now expects it (the existing file stays untouched); new CLI test `test_web_write_failure_after_send_includes_url` checks `(conversation: <url>)` on stderr. Mutation (wrap removed) failed both tests.
+- Live web image test also accepts JPEG via a stdlib `_assert_jpeg` (SOF0/1/2 size, checked on a synthetic header).
+- README: the `-k image` line now says the web image test also needs `SUBLLM_WEB=1`; the failure-mode text and the drivers-contract IMAGE SAVE item list the failed write; counts now 503 passed / 44 skipped.

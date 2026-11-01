@@ -11,7 +11,7 @@ can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one wit
 no call-site changes.
 
 **Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), plus an
-opt-in ChatGPT web route for text and images (`ChatGPTWebLLM`). 502 hermetic tests passing,
+opt-in ChatGPT web route for text and images (`ChatGPTWebLLM`). 503 hermetic tests passing,
 plus an opt-in live suite — the codex and claude paths verified end-to-end against
 live subscriptions.
 
@@ -217,7 +217,7 @@ Spends Chat quota (about 40 s per image). The prompt is prefixed with
 Codex route (`<UTC ts>-<8 hex>-<n>.<ext>`) and are PNG, WebP or JPEG at the size
 the page renders (1254x1254 observed). A text-only answer raises `OutputError`.
 Once the prompt may have been sent, any failure to get the files (a missing or
-non-image file, a timeout) raises `SendUnconfirmedError` with the conversation
+non-image file, a failed write into `out_dir`, a timeout) raises `SendUnconfirmedError` with the conversation
 URL; the call is never retried, so quota is not spent twice.
 
 ### ClaudeLLM (fallback)
@@ -447,7 +447,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (502 passed, 44 skipped)
+uv run pytest                 # no subscription, no network (503 passed, 44 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -463,7 +463,7 @@ aren't on `PATH`; a `QuotaError` becomes a skip rather than a failure:
 SUBLLM_LIVE=1 uv run pytest -m integration            # codex + claude
 SUBLLM_LIVE=1 uv run pytest -m integration -k codex   # codex only
 SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
-SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex + chatgpt.com image (spends quota)
+SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex image (spends quota); the web image test also needs SUBLLM_WEB=1
 SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # ego lite + chatgpt.com login
 ```
 

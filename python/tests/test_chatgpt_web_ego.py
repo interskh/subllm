@@ -664,9 +664,9 @@ def test_image_existing_target_is_never_overwritten(egoimg, monkeypatch):
     keep = egoimg.out / "20260102T030405-deadbeef-1.png"
     keep.write_bytes(b"KEEP")
     egoimg(img_ok("img-1"), 'cp "$STUB_DIR/png.bin" "$idir/img-1"')
-    with pytest.raises(ClientError, match="cannot write image") as ei:
+    with pytest.raises(SendUnconfirmedError, match="cannot write image") as ei:
         run_image(egoimg.out)
-    assert type(ei.value) is ClientError
+    assert ei.value.conversation_url == URL
     assert keep.read_bytes() == b"KEEP"
 
 

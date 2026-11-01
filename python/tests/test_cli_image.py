@@ -175,3 +175,17 @@ def test_web_zero_images_is_output_error(egoimg, capsys, monkeypatch):
 def test_browser_rejected_for_codex_route(capsys):
     assert main(["image", "--route", "codex", "--browser", "ego", "-o", "o", "x"]) == 2
     assert "--browser" in capsys.readouterr().err
+
+
+def test_web_write_failure_after_send_includes_url(egoimg, capsys, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setattr("subllm._images.secrets.token_hex", lambda n: "deadbeef")
+    monkeypatch.setattr("subllm._images.datetime", type("D", (), {
+        "now": staticmethod(lambda tz=None: __import__("datetime").datetime(2026, 1, 2, 3, 4, 5))
+    }))
+    out.mkdir()
+    (out / "20260102T030405-deadbeef-1.png").write_bytes(b"KEEP")
+    assert _web(out) == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: SendUnconfirmedError:")
+    assert f"(conversation: {URL})" in cap.err
