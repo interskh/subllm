@@ -430,7 +430,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (461 passed, 41 skipped)
+uv run pytest                 # no subscription, no network (462 passed, 42 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized

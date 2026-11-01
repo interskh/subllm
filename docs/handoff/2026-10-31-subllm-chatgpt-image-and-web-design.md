@@ -214,3 +214,11 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 - Reviewer residual risk fixed: the state loop no longer ends on `login_prompt` (a login control can flash before the session hydrates and would have handed off a logged-in space). It waits for `logged_in`/`challenge`; `login_prompt` only classifies after the 45 s wait. Node-harness test for the flash case; mutant (break on login_prompt) caught.
 - Harness tests that run out the 45 s wait now also make `setTimeout` immediate (ego tests 50 s -> 10 s).
 - Supersedes the cycle-1 line "The wait loop also exits early on `login_prompt`".
+
+### Slice 2 gate
+- Whole-run reviewer: BLOCK (prompt text read as a page error) -> fixed in 9e15e78 -> PASS; cycle 2 (c6b19d7) PASS. Codex: 3 MAJOR (same error-text bug, early send before the record, module-level fcntl), all fixed; re-check found 1 MAJOR in the fix (assistant wrapper exclusion hid a legacy alert), fixed in c6b19d7. Two of two fix cycles used.
+- Full suite at c6b19d7: 462 passed, 42 skipped. Browser fixture tests (SUBLLM_BROWSER=1): 30 passed. Live: opt-in test PASSED and one CLI call returned the token (before the gate fixes; the fixes touch only error classification, the pre-typing record, and the not-ready path).
+- Privacy scan 6f702da..HEAD: clean (author-identity warning only).
+- Deferred: flock OSError other than EWOULDBLOCK; `WebTextResult.conversation_url` typed str while `_map` can pass None; `finish()` after an error (guide advises against, spec D-4 keeps it); legacy answer without `.markdown` starting with an error phrase while the URL is a placeholder (reviewer: not a real scenario); the real chatgpt.com error placement is unverified live (a misplacement fails safe as SendUnconfirmedError).
+
+implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
