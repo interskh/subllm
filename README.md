@@ -174,8 +174,8 @@ attempt with no retry, so a refusal or timeout does not re-spend quota. It
 raises `OutputError` when codex produces no image, and `ClientError` when
 `out_dir` is not a writable directory (checked before codex starts).
 `references=[path, ...]` attaches image files to the prompt (codex `-i`), for
-example a character sheet the new image must match; a missing file raises
-`ClientError` before codex starts. `CodexLLM` implements the `ImageGenerator`
+example a character sheet the new image must match; a missing, unreadable or
+non-file path, or a path containing `,`, raises `ClientError` before codex starts. `CodexLLM` implements the `ImageGenerator`
 interface.
 
 ### Choosing a route
@@ -308,6 +308,9 @@ offline fixture tests only (`SUBLLM_BROWSER=1`, see Testing).
 ```python
 res = ChatGPTWebLLM().generate_image("A red circle on white.", "out/")
 print(res.paths, res.conversation_url)   # route == "web"
+
+# Same, matching an existing image:
+res = ChatGPTWebLLM().generate_image("Redraw this in blue.", "out/", references=["sheet.png"])
 ```
 
 Spends Chat quota (about 40 s per image). The prompt is prefixed with
@@ -317,6 +320,11 @@ the page renders (1254x1254 observed). A text-only answer raises `OutputError`.
 Once the prompt may have been sent, any failure to get the files (a missing or
 non-image file, a failed write into `out_dir`, a timeout) raises `SendUnconfirmedError` with the conversation
 URL; the call is never retried, so quota is not spent twice.
+`references=[path, ...]` uploads image files into the chat composer before the
+prompt is typed, and the call waits until every upload has finished. A missing,
+unreadable or non-file path raises `ClientError` before any browser is touched, as
+does a composer that already holds attachments. If the upload does not finish
+within `60 + 15 * n` seconds the call raises `ClientError` and nothing is sent.
 
 ### ClaudeLLM (fallback)
 
@@ -503,8 +511,9 @@ also a usage error (exit 2). A `ModelDowngradeError` prints
 
 `image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
-stderr and exits 1. `--ref FILE` (repeatable) attaches reference images on the
-codex route and is rejected for `--route web` (exit 2). With `--route web`,
+stderr and exits 1. `--ref FILE` (repeatable) attaches reference images on both
+routes; an unusable file is a typed `ClientError` (exit 1) before any browser or
+codex starts. With `--route web`,
 `--browser` selects the browser (rejected for `--route codex`, exit 2), a
 `SendUnconfirmedError` line ends with `(conversation: <url>)`, and
 `HumanActionRequired` exits 3.
@@ -669,7 +678,7 @@ npm --prefix ts test         # run the vitest suite
 | `ChatGPTWebLLM.complete_result` | `(prompt) -> WebTextResult` |
 | `WebTextResult` | `text, format ("markdown"\|"plain"), served_model, conversation_url` (frozen) |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
-| `ChatGPTWebLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry, route `"web"` |
+| `ChatGPTWebLLM.generate_image` | `(prompt, out_dir, *, references=()) -> ImageResult` — one attempt, no retry, route `"web"` |
 | `CodexLLM.generate_image` | `(prompt, out_dir, *, references=()) -> ImageResult` — one attempt, no retry; `references` are files attached with codex `-i` |
 | `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
 | `ImageGenerator` | abstract base with `generate_image(prompt, out_dir)` |

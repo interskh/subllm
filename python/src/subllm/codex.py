@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-from subllm._images import prepare_out_dir, save_numbered
+from subllm._images import prepare_out_dir, resolve_references, save_numbered
 from subllm.base import BaseLLM, ImageGenerator, ImageResult, _retry, _validate_with_model
 from subllm.drivers.codex_exec import run_codex_exec
 from subllm.drivers.codex_web import run_codex_web_task
@@ -93,20 +92,9 @@ class CodexLLM(BaseLLM, ImageGenerator):
         a character sheet the new image must match."""
         if self._guard is not None:
             self._guard.check()  # RegionError before any subprocess
-        refs: list[Path] = []
-        for r in references:
-            # Every check here runs before codex starts: codex ignores a missing
-            # or unreadable -i file silently, and clap may split -i values on ",".
-            try:
-                p = Path(r).expanduser()
-                ok = p.is_file() and os.access(p, os.R_OK)
-            except (OSError, RuntimeError) as e:
-                raise ClientError(f"cannot use reference image {r}: {e}") from e
-            if not ok:
-                raise ClientError(f"reference image is not a readable file: {r}")
-            if "," in str(p):
-                raise ClientError(f"reference image path must not contain ',': {r}")
-            refs.append(p)
+        # codex ignores a missing or unreadable -i file silently and clap may
+        # split -i values on ",", so every check runs before codex starts.
+        refs = resolve_references(references, forbid_comma=True)
         dest = prepare_out_dir(out_dir)
         saved: list[Path] = []
 

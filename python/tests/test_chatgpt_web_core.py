@@ -288,6 +288,10 @@ GROUPS = [
         ("pre_decode", DECODE_IMAGES),
         ("image_probe", call("turnStatus", KEY, None)),
     ]),
+    ("redesign-completed-image-reference.html", [
+        ("pre_decode_ref", DECODE_IMAGES),
+        ("ref_image_probe", call("turnStatus", None, None)),
+    ]),
     (MENU_FIXTURE, [
         ("menu_model", call("servedModel", MENU_KEY)),
         ("menu_model_nokey", call("servedModel", None)),
@@ -715,6 +719,13 @@ def test_image_probe_excludes_icon_and_user_image(r):
     assert len({user_img, icon, big}) == 3
     assert r["image_probe"]["images"] == [big]
     assert "PINEAPPLE" in r["image_probe"]["text"]
+
+
+def test_image_probe_excludes_the_reference_attachment_in_the_user_turn(r):
+    html = (FIXTURES / "redesign-completed-image-reference.html").read_text()
+    thumb, generated = [s for s in re.findall(r'<img[^>]*? src="([^"]+)"', html) if len(s) > 500]
+    assert thumb != generated
+    assert r["ref_image_probe"]["images"] == [generated]
 
 
 def test_chrome_image_fetch_writes_the_fixture_bytes(tmp_path_factory):

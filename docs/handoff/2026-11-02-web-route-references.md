@@ -39,3 +39,38 @@
 - Full hermetic suite (tripwire codex/claude/ego-browser stubs first on PATH): 724 passed, 141 skipped; tripwire log empty. Browser tests (SUBLLM_BROWSER=1, codex/claude tripwires, real ego lite + headless Chrome): core + codex_web 269 passed; core 128 (64 per substrate, 11 new each); tripwire log empty.
 - Mutation battery: 11/11 caught (pending, capture exclusion, multiple requirement, readyReads streak x2, count equality, failed check x2, attach call removed, budget, pre-check).
 - Live capture: ego lite, synthetic solid-gradient PNG named reference-1.png, setInputFiles only, no key/click on Send; task space closed with `finish({ keep: [] })`. No login wall/challenge.
+
+## T2 - client, CLI, docs, live proof
+
+**Decisions**
+- Shared helper `resolve_references(refs, *, forbid_comma=False)` in `_images.py` (readable regular file, `~` expanded, resolved absolute; OSError/RuntimeError -> ClientError). Codex calls it with `forbid_comma=True` (clap `-i` split is codex-only); web calls it plain, so a comma path is valid there.
+- Web order: guard -> empty prompt -> references -> out_dir -> driver resolve. A bad reference touches no browser and creates no out_dir.
+- Driver gets `references=` only when non-empty (empty = byte-identical old call; old FakeChrome-style drivers unaffected).
+- CLI: dropped the web-route `--ref` exit-2 branch; `--ref` help/docstring updated.
+- Removed the now-unused `import os` in codex.py (orphan from the refactor).
+
+**Rejected**
+- Duplicating the codex validation loop in the web client (drift risk).
+- Forbidding ',' on the web route too: not a limitation there.
+
+**Assumptions**
+- Relative reference paths resolve against the caller's cwd (same as codex route).
+
+**Deferred**
+- The live-proof bug (reference thumbnail collected as an output) was fixed in the fix round below.
+
+**Touches**
+- `_images.py`, `codex.py`, `chatgpt_web.py`, `cli.py`; README, `docs/drivers-contract.md`, spec non-goal + deferred lines; tests `test_chatgpt_web_llm.py`, `test_cli_image.py` (web-route rejection test replaced).
+
+**Evidence**
+- Tripwire (codex/claude/ego-browser exit-127 stubs first on PATH) log empty for the focused, mutation and full runs. Mutations 8/8 caught.
+- Live (1 call, ego lite, Chat quota): `subllm image --route web --ref <orange star png> -o <scratch>` exit 0, ~58 s, 2 PNGs 1448x1086. File 2 = blue star, same shape/position as reference (follows it). File 1 is byte-identical to the reference upload (the bug above). `text` was empty.
+
+**Fix round (reference thumbnail collected as output)**
+- DOM finding (redesign layout, shape only): both the user turn and the assistant turn sit under ONE `[data-turn-key]` wrapper. The user message unit carries `data-chatgpt-search-unit-key="<turn>:0:user"` (note `chatgpt-search`, not the `content-search` attribute USER_SEL knew); the thumbnail is `img` > `div[role=button][aria-label="User attachment"]` > unit. The generated image is `img` > `button[data-testid=generated-image-preview]` > gallery, outside any `:user` unit. No `data-message-author-role` in this layout.
+- Fix: `USER_SEL` in page_core.js gains `[data-chatgpt-search-unit-key$=':user']` (structure, not filenames/aria text). Left `copyButton`/`MESSAGE_SEL` untouched (not needed for this bug).
+- Rejected: matching `aria-label="User attachment"` (text, localisable); filtering by src/size (generated and reference can be equal-sized).
+- Fixture `redesign-completed-image-reference.html` (sanitize.py output; ids synthetic, no URLs; images -> distinct 200px synthetic PNG data URLs, other imgs 1px). Test `test_image_probe_excludes_the_reference_attachment_in_the_user_turn` runs on ego + chrome.
+- Mutation: removing the new selector fails the test on both substrates (2/2).
+- Live re-run (1 call, fresh dir): exit 0, ~48 s, exactly one file, PNG 1448x1086, blue star, differs from the reference bytes.
+- Browser tests (core/ego/chrome, codex+claude tripwires first on PATH, real ego + Chrome): 341 passed, tripwire log empty.

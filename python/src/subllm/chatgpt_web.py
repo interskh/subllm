@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from subllm._images import prepare_out_dir
+from subllm._images import prepare_out_dir, resolve_references
 from subllm.base import BaseLLM, ImageGenerator, ImageResult, WebTextResult
 from subllm.codex import _JSON_INSTRUCTION, _parse_json_object
 from subllm.drivers.chatgpt_web.chrome import ChromeDriver
@@ -83,16 +83,21 @@ class ChatGPTWebLLM(BaseLLM, ImageGenerator):
             raise OutputError("chatgpt.com returned an empty answer")
         return result
 
-    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult:
+    def generate_image(
+        self, prompt: str, out_dir: str | Path, *, references: Sequence[str | Path] = (),
+    ) -> ImageResult:
         if self._guard is not None:
             self._guard.check()  # RegionError before any browser subprocess
         if not normalize_prompt(prompt).strip():
             raise ClientError("the prompt is empty")
+        refs = resolve_references(references)
         dest = prepare_out_dir(out_dir)
         driver = self._resolve_driver()
         driver.check_guide()
+        extra = {"references": refs} if refs else {}
         return driver.run_image(
-            _IMAGE_INSTRUCTION + prompt, dest, timeout_s=self._timeout_s, mode=self._mode
+            _IMAGE_INSTRUCTION + prompt, dest, timeout_s=self._timeout_s, mode=self._mode,
+            **extra,
         )
 
     def complete(self, prompt: str) -> str:

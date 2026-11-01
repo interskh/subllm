@@ -649,7 +649,7 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   before any subprocess or lock.
 - IMAGE MODE. `ARGS.kind == "image"`; the prompt is prefixed "Generate an image: ".
   The wait loop ends when no Stop button is rendered and the set of loaded images
-  (wider than 128 px, in the new turn, outside user units) is non-empty and
+  (wider than 128 px, in the new turn, outside user units, i.e. `:user` search units under either the `data-content-search-unit-key` or `data-chatgpt-search-unit-key` attribute, so a reference thumbnail is never collected) is non-empty and
   unchanged between two reads. A finished turn with no images for 8 s is
   `output` ("no image in the answer"), so a text-only answer is `OutputError`.
   The Copy button is not required.
@@ -679,6 +679,15 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   A missing input, failed upload, wrong chip count or the bound (`60 + 15 * n` s)
   is a `ClientError` before the keypress record: nothing was typed or sent, and the
   call never falls back to sending without the references.
+- REFERENCE IMAGES, CLIENT LEVEL. `ChatGPTWebLLM.generate_image(prompt, out_dir, *,
+  references=())` validates each reference after the region guard and the empty-prompt
+  check and before `out_dir` is created or any browser is resolved: it must be a
+  readable regular file (`~` expanded, relative paths resolved against the cwd), else
+  a plain `ClientError`. It passes the resolved absolute paths, in order, to
+  `run_image(references=...)`; an empty list passes nothing (today's call exactly).
+  The codex route shares this check and additionally refuses a ',' in the path
+  (a clap `-i` quirk that does not apply here). `subllm image --route web --ref FILE`
+  (repeatable) feeds it.
 - MODE SELECTION (D-8). `selectMode(target)` is a pure step planner for the composer's
   "Thinking effort" slider (levels Instant, Medium, High, Extra High, Pro; `thinking`
   = Medium, `pro` = Pro, or a level name). Radix opens on real pointer input, so the

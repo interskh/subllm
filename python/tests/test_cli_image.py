@@ -293,9 +293,25 @@ def test_ref_flags_reach_codex(fake_bin, home, tmp_path, monkeypatch, capsys):
     assert [argv[i + 1] for i, v in enumerate(argv) if v == "-i"] == [str(a.resolve()), str(b.resolve())]
 
 
-def test_ref_rejected_for_web_route(capsys):
-    assert main(["image", "--route", "web", "--ref", "a.png", "-o", "o", "x"]) == 2
-    assert "--ref" in capsys.readouterr().err
+def test_ref_flags_reach_web(egoimg, tmp_path, capsys):
+    d, out = egoimg
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    a.write_bytes(PNG_BYTES)
+    b.write_bytes(PNG_BYTES)
+    rc = main(["image", "--route", "web", "-o", str(out), "--ref", str(a), "--ref", str(b), "x"])
+    assert rc == 0
+    line = next(l for l in (d / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    assert json.loads(line[len("const ARGS = "):].rstrip(";"))["references"] == [
+        str(a.resolve()), str(b.resolve())]
+
+
+def test_missing_ref_on_web_is_typed_error_before_browser(egoimg, tmp_path, capsys):
+    d, out = egoimg
+    rc = main(["image", "--route", "web", "-o", str(out), "--ref", str(tmp_path / "nope.png"), "x"])
+    assert rc == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: ClientError:")
+    assert not (d / "ran").exists() and not (d / "calls").exists()
 
 
 def test_missing_ref_is_typed_error(fake_bin, home, tmp_path, capsys):

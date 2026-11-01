@@ -6,7 +6,7 @@
     subllm complete-json  --client codex|claude|chatgpt-web [--schema schema.json] [PROMPT]
     subllm web-agent      --client codex|claude --model M [--tools web|none]
                           [--schema schema.json] [--timeout S] [PROMPT]
-    subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome]
+    subllm image          --route codex|web -o OUT_DIR [--ref FILE ...] [--browser auto|ego|chrome]
                           [--mode default|thinking|pro] [--plan free|plus|pro] [PROMPT]
 
 PROMPT is read from the argument, or stdin when omitted / '-'.
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--plan", default=None, choices=_PLAN_CHOICES)
     i.add_argument("-o", "--out-dir", required=True)
     i.add_argument("--ref", action="append", default=None, metavar="FILE",
-                   help="reference image attached to the prompt (repeatable; codex route only)")
+                   help="reference image attached to the prompt (repeatable)")
     i.add_argument("prompt", nargs="?", default=None)
 
     try:
@@ -293,8 +293,6 @@ def main(argv: list[str] | None = None) -> int:
             for flag in ("browser", "mode", "plan"):
                 if getattr(args, flag) is not None:
                     parser.error(f"--{flag} is only supported with --route web")
-        if args.cmd == "image" and args.route == "web" and args.ref:
-            parser.error("--ref is only supported with --route codex")
         if args.cmd == "web-agent":
             return _run_web_agent(args)
         if args.cmd == "image":

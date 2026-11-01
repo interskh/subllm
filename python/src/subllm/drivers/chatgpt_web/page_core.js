@@ -184,7 +184,7 @@
     return out;
   };
 
-  const USER_SEL = "[data-content-search-unit-key$=':user'], [data-message-author-role=user], [data-conversation-role=user], [data-user-message-bubble]";
+  const USER_SEL = "[data-content-search-unit-key$=':user'], [data-chatgpt-search-unit-key$=':user'], [data-message-author-role=user], [data-conversation-role=user], [data-user-message-bubble]";
   const turnImages = (turn, scope) => {
     const roots = turn ? [turn] : [];
     if (scope && !(turn && turn.contains(scope))) roots.push(scope);

@@ -36,7 +36,7 @@ Goals, with the evidence that shows each is met:
 - **No backend replay.** subllm never calls `chatgpt.com/backend-api` from Python, Node, or a page-context `fetch` of an API path. In-page `fetch(img.src)` of an image the page already renders is allowed (it is the page's own resource).
 - **No HTTP endpoint, no OpenAI-compatible shim**, and no reuse of `~/.codex/auth.json` outside the real `codex` binary. "Sign in with ChatGPT" plan usage is out (Codex/Work pool, no images).
 - **Deep Research, Agent mode, and Work mode** are out of this spec (follow-up spec).
-- **Image editing, aspect-ratio controls, and multi-image batches** are out. The prompt carries any size or ratio wording. (Reference images on the codex route were added after this spec, 2026-11-02: `generate_image(..., references=)` / `--ref`; the web route still takes none.)
+- **Image editing, aspect-ratio controls, and multi-image batches** are out. The prompt carries any size or ratio wording. (Reference images were added after this spec, 2026-11-02, on both routes: `generate_image(..., references=)` / `--ref`; on the web route they are uploaded through the composer file input.)
 - **No CAPTCHA or Turnstile solving.** Challenges and logins hand off to the human.
 - **No conversation deletion.** Deleting chats needs extra UI automation or a backend call; deferred (§7).
 - **Existing calls do not change.** `CodexLLM.complete*`, `ClaudeLLM`, `FallbackLLM` defaults, and the CLI's existing flags keep their behaviour.
@@ -253,7 +253,7 @@ DOM fixtures are captured live from chatgpt.com states (logged out, idle Chat co
 - Honour image-use's `~/.chatgpt-web.lock` for cross-tool serialization on one account; account-wide (cross-machine) serialization; and holding the next call while a `SendUnconfirmedError` conversation may still be generating remotely.
 - Typed handling of the specific Pro-cap dialog text, and reading remaining Pro quota from the page.
 - Full-size originals via `estuary/content?…&p=fs` when the rendered `blob:` image is downscaled (check sizes in slice 3 first).
-- Reference-image upload on the web route (composer file input) and image editing on both routes. (Codex-route references via `codex exec -i` shipped 2026-11-02.)
+- Image editing on both routes. (Reference images shipped 2026-11-02: `codex exec -i` on the codex route, composer file upload on the web route.)
 - Deep Research and Agent mode (follow-up spec).
 - TS SDK parity.
 

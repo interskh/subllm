@@ -5,6 +5,7 @@ import secrets
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 from subllm.errors import ClientError
 
@@ -18,6 +19,27 @@ def prepare_out_dir(out_dir: str | Path) -> Path:
     except (OSError, RuntimeError) as e:
         raise ClientError(f"cannot use out_dir {out_dir}: {e}") from e
     return dest
+
+
+def resolve_references(
+    references: Sequence[str | Path], *, forbid_comma: bool = False,
+) -> list[Path]:
+    """Absolute paths of reference images, or ClientError for the first bad one.
+    Runs before any subprocess/browser so a bad input never spends quota."""
+    refs: list[Path] = []
+    for r in references:
+        try:
+            p = Path(r).expanduser()
+            ok = p.is_file() and os.access(p, os.R_OK)
+            p = p.resolve()
+        except (OSError, RuntimeError) as e:
+            raise ClientError(f"cannot use reference image {r}: {e}") from e
+        if not ok:
+            raise ClientError(f"reference image is not a readable file: {r}")
+        if forbid_comma and "," in str(p):
+            raise ClientError(f"reference image path must not contain ',': {r}")
+        refs.append(p)
+    return refs
 
 
 def save_numbered(files: list[tuple[Path, str]], dest: Path) -> list[Path]:

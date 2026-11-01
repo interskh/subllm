@@ -131,9 +131,9 @@ class FakeChrome:
             raise FakeChrome.run_error
         return WebTextResult(text="from chrome", format="plain", served_model=None, conversation_url=URL)
 
-    def run_image(self, prompt, dest, *, timeout_s, mode="default"):
+    def run_image(self, prompt, dest, *, timeout_s, mode="default", **extra):
         FakeChrome.calls.append("run_image")
-        FakeChrome.kwargs.append({"timeout_s": timeout_s, "mode": mode})
+        FakeChrome.kwargs.append({"timeout_s": timeout_s, "mode": mode, **extra})
         if FakeChrome.run_error:
             raise FakeChrome.run_error
         p = dest / "chrome-1.png"
@@ -472,3 +472,52 @@ def test_generate_image_is_one_attempt(egoimg, monkeypatch):
 
 def test_is_image_generator():
     assert isinstance(ChatGPTWebLLM(), ImageGenerator)
+
+
+def _script_args(d):
+    line = next(l for l in (d / "script.js").read_text().splitlines() if l.startswith("const ARGS = "))
+    return json.loads(line[len("const ARGS = "):].rstrip(";"))
+
+
+def test_references_reach_the_driver_absolute_and_in_order(egoimg, tmp_path, monkeypatch):
+    d, out = egoimg
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    (refs / "sheet.png").write_bytes(PNG_BYTES)
+    (refs / "pose,2.png").write_bytes(PNG_BYTES)
+    monkeypatch.chdir(tmp_path)
+    ChatGPTWebLLM().generate_image("x", out, references=["refs/sheet.png", refs / "pose,2.png"])
+    assert _script_args(d)["references"] == [
+        str((refs / "sheet.png").resolve()), str((refs / "pose,2.png").resolve())
+    ]
+
+
+def test_no_references_is_todays_call(egoimg, chrome):
+    d, out = egoimg
+    ChatGPTWebLLM().generate_image("x", out)
+    assert _script_args(d)["references"] == []
+    ChatGPTWebLLM(browser="chrome").generate_image("x", out)
+    assert chrome.kwargs[-1] == {"timeout_s": 600.0, "mode": "default"}
+
+
+def test_references_reach_chrome_driver(chrome, tmp_path):
+    ref = tmp_path / "r.png"
+    ref.write_bytes(PNG_BYTES)
+    ChatGPTWebLLM(browser="chrome").generate_image("x", tmp_path / "o", references=[ref])
+    assert chrome.kwargs[-1]["references"] == [ref.resolve()]
+
+
+def test_bad_reference_is_client_error_before_any_browser(egoimg, chrome, tmp_path):
+    d, out = egoimg
+    locked = tmp_path / "locked.png"
+    locked.write_bytes(PNG_BYTES)
+    locked.chmod(0)
+    bad = [tmp_path / "nope.png", tmp_path, "~no-such-user-xyz/ref.png"]
+    if os.getuid() != 0:
+        bad.append(locked)
+    for ref in bad:
+        with pytest.raises(ClientError, match="reference") as ei:
+            ChatGPTWebLLM().generate_image("x", out, references=[ref])
+        assert type(ei.value) is ClientError
+    assert not (d / "ran").exists() and not (d / "calls").exists()
+    assert chrome.calls == [] and not out.exists()
