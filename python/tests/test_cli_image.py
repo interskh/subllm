@@ -6,6 +6,9 @@ import pytest
 
 from subllm.cli import main
 
+from .test_chatgpt_web_ego import PNG_BYTES, URL, ev, fail, img_ok
+from .test_chatgpt_web_llm import egoimg  # noqa: F401
+
 _WRITE = r'''
 mkdir -p "$CODEX_HOME/generated_images/t1"
 printf 'PNGDATA' > "$CODEX_HOME/generated_images/t1/exec-1.png"
@@ -76,7 +79,6 @@ def test_quota_is_typed_error(fake_bin, home, tmp_path, capsys):
 
 
 @pytest.mark.parametrize("argv", [
-    ["image", "--route", "web", "-o", "o", "x"],
     ["image", "--route", "codex", "x"],
     ["image", "-o", "o", "x"],
 ])
@@ -101,3 +103,75 @@ def test_out_dir_is_file_typed_error(fake_bin, home, tmp_path, capsys):
     cap = capsys.readouterr()
     assert rc == 1 and cap.out == ""
     assert cap.err.startswith("error: ClientError: ")
+
+
+def _web(out, *extra, prompt="a cube"):
+    return main(["image", "--route", "web", "-o", str(out), *extra, prompt])
+
+
+def test_web_success_json(egoimg, capsys):
+    d, out = egoimg
+    rc = _web(out)
+    cap = capsys.readouterr()
+    assert rc == 0 and cap.err == "" and cap.out.count("\n") == 1
+    doc = json.loads(cap.out)
+    assert set(doc) == {"paths", "route", "text", "conversation_url", "served_model"}
+    assert doc["route"] == "web" and doc["conversation_url"] == URL
+    assert len(doc["paths"]) == 1
+    assert Path(doc["paths"][0]).parent == out.resolve()
+    assert Path(doc["paths"][0]).read_bytes() == PNG_BYTES
+
+
+def test_web_browser_flag_accepted(egoimg, capsys):
+    d, out = egoimg
+    assert _web(out, "--browser", "ego") == 0
+    assert json.loads(capsys.readouterr().out)["route"] == "web"
+
+
+def test_web_browser_flag_reaches_client(egoimg, capsys):
+    d, out = egoimg
+    assert _web(out, "--browser", "chrome") == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: ClientError:")
+
+
+def test_web_prompt_from_stdin(egoimg, capsys, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setattr("sys.stdin", io.StringIO("stdin prompt"))
+    assert main(["image", "--route", "web", "-o", str(out)]) == 0
+    assert len(json.loads(capsys.readouterr().out)["paths"]) == 1
+    assert "Generate an image: stdin prompt" in (d / "script.js").read_text()
+
+
+def test_web_human_action_exits_3(egoimg, capsys, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", fail("human_action", "log in to chatgpt.com in ego lite"))
+    monkeypatch.setenv("STUB_KEYPRESS", "0")
+    monkeypatch.setenv("STUB_CODE", "1")
+    assert _web(out) == 3
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: HumanActionRequired:")
+
+
+def test_web_send_unconfirmed_includes_url(egoimg, capsys, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", ev(phase="accepted", conversation_url=URL))
+    monkeypatch.setenv("STUB_CODE", "1")
+    assert _web(out) == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    assert cap.err.startswith("error: SendUnconfirmedError:") and f"(conversation: {URL})" in cap.err
+
+
+def test_web_zero_images_is_output_error(egoimg, capsys, monkeypatch):
+    d, out = egoimg
+    monkeypatch.setenv("STUB_STDOUT", ev(phase="accepted", conversation_url=URL) + "\n" + fail("output", "no image in the answer", url=URL))
+    monkeypatch.setenv("STUB_CODE", "1")
+    assert _web(out) == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err.startswith("error: OutputError:")
+
+
+def test_browser_rejected_for_codex_route(capsys):
+    assert main(["image", "--route", "codex", "--browser", "ego", "-o", "o", "x"]) == 2
+    assert "--browser" in capsys.readouterr().err

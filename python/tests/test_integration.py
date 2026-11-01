@@ -11,7 +11,7 @@ Run:
     SUBLLM_LIVE=1 uv run pytest -m integration -v
     SUBLLM_LIVE=1 uv run pytest -m integration -k codex     # codex only
     SUBLLM_LIVE=1 uv run pytest -m integration -k claude    # claude only
-    SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex image (spends quota)
+    SUBLLM_LIVE=1 uv run pytest -m integration -k image     # codex + chatgpt.com image (spends quota)
     SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # chatgpt.com web route
 
 Requirements:
@@ -162,4 +162,43 @@ def test_chatgpt_web_complete_result_round_trips_token():
     ))
     assert token in res.text.lower(), f"token did not round-trip: {res.text!r}"
     assert res.format in {"markdown", "plain"}
+    assert res.conversation_url.startswith("https://chatgpt.com/c/")
+
+
+def _assert_webp(path) -> tuple[int, int]:
+    data = path.read_bytes()
+    assert data[:4] == b"RIFF" and data[8:12] == b"WEBP", f"not a WebP: {path.name}"
+    kind, body = data[12:16], data[20:]
+    if kind == b"VP8 ":
+        w, h = struct.unpack("<HH", body[6:10])
+        size = (w & 0x3FFF, h & 0x3FFF)
+    elif kind == b"VP8L":
+        bits = struct.unpack("<I", body[1:5])[0]
+        size = ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    elif kind == b"VP8X":
+        size = (int.from_bytes(body[4:7], "little") + 1, int.from_bytes(body[7:10], "little") + 1)
+    else:
+        raise AssertionError(f"unknown WebP chunk {kind!r}")
+    assert size[0] > 0 and size[1] > 0, f"bad WebP size: {size}"
+    return size
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SUBLLM_WEB"),
+    reason="chatgpt.com web route test; set SUBLLM_WEB=1 to run",
+)
+@pytest.mark.skipif(shutil.which("ego-browser") is None, reason="ego-browser not on PATH")
+def test_chatgpt_web_generate_image_writes_decodable_image(tmp_path):
+    # Spends a little ChatGPT Chat quota (~40 s) and leaves one regular chat in history.
+    out_dir = tmp_path / "out"
+    res = _live(lambda: ChatGPTWebLLM().generate_image(
+        "A simple red circle on a plain white background.", out_dir
+    ))
+    assert res.paths, "no image files returned"
+    for p in res.paths:
+        assert p.resolve().parent == out_dir.resolve(), f"outside out_dir: {p}"
+        head = p.read_bytes()[:12]
+        size = _assert_webp(p) if head[:4] == b"RIFF" else _assert_decodable_png(p)
+        assert min(size) >= 256, f"image too small: {size}"
+    assert res.route == "web"
     assert res.conversation_url.startswith("https://chatgpt.com/c/")

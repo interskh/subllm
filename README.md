@@ -11,7 +11,7 @@ can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one wit
 no call-site changes.
 
 **Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), plus an
-opt-in ChatGPT web route for text (`ChatGPTWebLLM`). 461 hermetic tests passing,
+opt-in ChatGPT web route for text and images (`ChatGPTWebLLM`). 502 hermetic tests passing,
 plus an opt-in live suite — the codex and claude paths verified end-to-end against
 live subscriptions.
 
@@ -205,6 +205,21 @@ Only `mode="default"` is available; the Chrome driver is not available yet, so
 `browser="auto"` currently means ego lite. A call makes exactly one send and never
 retries; calls are serialized per machine by a file lock.
 
+#### Image generation (web route)
+
+```python
+res = ChatGPTWebLLM().generate_image("A red circle on white.", "out/")
+print(res.paths, res.conversation_url)   # route == "web"
+```
+
+Spends Chat quota (about 40 s per image). The prompt is prefixed with
+"Generate an image: " and every call opens a new chat. Files are named like the
+Codex route (`<UTC ts>-<8 hex>-<n>.<ext>`) and are PNG, WebP or JPEG at the size
+the page renders (1254x1254 observed). A text-only answer raises `OutputError`.
+Once the prompt may have been sent, any failure to get the files (a missing or
+non-image file, a timeout) raises `SendUnconfirmedError` with the conversation
+URL; the call is never retried, so quota is not spent twice.
+
 ### ClaudeLLM (fallback)
 
 ```python
@@ -361,7 +376,7 @@ subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
 subllm complete       --client chatgpt-web [--browser auto|ego|chrome] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
-subllm image          --route codex -o OUT_DIR [PROMPT]
+subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome] [PROMPT]
 ```
 
 `PROMPT` comes from the argument or stdin (`-`). For `complete` /
@@ -380,7 +395,9 @@ so a wrapper can prompt the user to log in.
 
 `image` prints one JSON line (`paths`, `route`, `text`, `conversation_url`,
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
-stderr and exits 1.
+stderr and exits 1. With `--route web`, `--browser` selects the browser (rejected
+for `--route codex`, exit 2), a `SendUnconfirmedError` line ends with
+`(conversation: <url>)`, and `HumanActionRequired` exits 3.
 
 ### `web-agent` (machine-facing)
 
@@ -430,7 +447,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (462 passed, 42 skipped)
+uv run pytest                 # no subscription, no network (502 passed, 44 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
@@ -446,7 +463,7 @@ aren't on `PATH`; a `QuotaError` becomes a skip rather than a failure:
 SUBLLM_LIVE=1 uv run pytest -m integration            # codex + claude
 SUBLLM_LIVE=1 uv run pytest -m integration -k codex   # codex only
 SUBLLM_LIVE=1 uv run pytest -m integration -k claude  # claude only
-SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex image (spends quota)
+SUBLLM_LIVE=1 uv run pytest -m integration -k image   # codex + chatgpt.com image (spends quota)
 SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web  # ego lite + chatgpt.com login
 ```
 
@@ -533,6 +550,7 @@ npm --prefix ts test         # run the vitest suite
 | `ChatGPTWebLLM.complete_result` | `(prompt) -> WebTextResult` |
 | `WebTextResult` | `text, format ("markdown"\|"plain"), served_model, conversation_url` (frozen) |
 | `CodexLLM.run_web_task` / `ClaudeLLM.run_web_task` | `(prompt, schema_model=None, *, tools="web", timeout_s=300) -> WebAgentResult` — one attempt, no retry |
+| `ChatGPTWebLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry, route `"web"` |
 | `CodexLLM.generate_image` | `(prompt, out_dir) -> ImageResult` — one attempt, no retry |
 | `ImageResult` | `paths, route, text, conversation_url, served_model` (frozen) |
 | `ImageGenerator` | abstract base with `generate_image(prompt, out_dir)` |

@@ -253,3 +253,33 @@ implement-loop: slice 2 shipped c6b19d7; remaining: [3, 4, 5]
 - New: `python/src/subllm/_images.py`, `tests/fixtures/chatgpt_web/synthetic-completed-image.html`.
 - Edited: `chatgpt_web.py`, `codex.py` (refactor only), `drivers/chatgpt_web/{ego.py,ego_run.js,page_core.js}`, tests `test_chatgpt_web_{core,ego,llm}.py`, `test_codex_image.py` (2 patch targets).
 - Shared surface: `_map` return type (dict), `build_script` signature (new kwargs).
+
+### T2 — `subllm image --route web`, opt-in live test, docs
+
+**Decisions**
+- One helper `_report_web_error(e) -> int` (stderr line, ` (conversation: <url>)` for SendUnconfirmedError, exit 3 for HumanActionRequired) now serves both `complete --client chatgpt-web` and `image --route web`; the codex image path keeps its own two-line handler, byte-identical.
+- `--browser` on `image` is parsed for both routes and rejected after parsing for `--route codex` (`parser.error`, rc 2), like `complete`.
+- Web CLI tests reuse the `egoimg` fixture from `test_chatgpt_web_llm.py` (real stub `ego-browser`, real file copy), so the CLI is exercised through the real driver.
+- Live test accepts PNG or WebP (sniffed from the first bytes) with min side >= 256; `_assert_webp` reads VP8/VP8L/VP8X sizes (checked on synthetic headers for all three).
+
+**Rejected**
+- Routing the codex image errors through the web helper: would change the codex path (exit codes, URL suffix) for no gain.
+- A shared client-builder for `image` and `complete`: two lines each, not worth an abstraction.
+
+**Assumptions**
+- The README claims (1254x1254, ~40 s, JPEG possible) come from the spec's live results and the driver's magic-byte list; JPEG has not been observed live.
+
+**Deferred**
+- `--mode`/`--plan` for image (slice 5). Live run of the new test (orchestrator).
+
+**Touches**
+- Edited: `python/src/subllm/cli.py`, `tests/test_cli_image.py` (dropped the `--route web` case from `test_argparse_errors`: the route is valid now, so argparse no longer rejects it), `tests/test_integration.py`, `README.md`, `docs/drivers-contract.md`.
+- Shared surface: `image --route` choices and `--browser` flag.
+
+**Orchestrator additions (T2): live results**
+- Live call 1: `SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k "chatgpt_web and image"` PASSED in 44 s.
+- Live call 2: `uv run subllm image --route web -o <scratch>` rc 0 in 42 s; one PNG, 1254x1254 RGB, about 1.1 MB, content matches the prompt; `text` was "" (image-only turn, no Copy capture), `served_model` null, `conversation_url` a server id. Output kept outside the repo.
+- T1 assumption discharged: `page.fetch(blob:..., {saveAs})` into the per-call temp dir works in the generated script; containment and PNG sniff passed on the real file.
+- Slice-2 gate fixes on the live send path: both sends returned ok, which the driver accepts only with the keypress record present, so the record-before-typing path works live. No false rejection or error dialog was read during either image turn (prompt had no error words, so the prompt-exclusion case was not stressed). No login wall or hand-off; whether a login flash happened is not observable from the result.
+- A live completed-image DOM capture was not taken; `synthetic-completed-image.html` stands in.
+- Quota note: a T2 CLI mutant (web route built as `CodexLLM`) ran one real `codex exec` image call before it was killed; its file was deleted. Mutation runs on the route branch now need a stub `codex` on PATH.

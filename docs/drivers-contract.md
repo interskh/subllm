@@ -532,7 +532,7 @@ violate D-6 and its trust-dialog handling answers the wrong option here).
   session.
 
 
-## chatgpt_web (ChatGPT web route, text)
+## chatgpt_web (ChatGPT web route)
 
 Spec: `docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md`
 (D-3 to D-7, section 4.3). Python only. The route drives the official chatgpt.com
@@ -618,3 +618,19 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   `ClientError` ("chatgpt.com did not become ready") and no hand-off happens.
 - EMPTY PROMPT. A prompt that is empty after normalization is a `ClientError`
   before any subprocess or lock.
+- IMAGE MODE. `ARGS.kind == "image"`; the prompt is prefixed "Generate an image: ".
+  The wait loop ends when no Stop button is rendered and the set of loaded images
+  (wider than 128 px, in the new turn, outside user units) is non-empty and
+  unchanged between two reads. A finished turn with no images for 8 s is
+  `output` ("no image in the answer"), so a text-only answer is `OutputError`.
+  The Copy button is not required.
+- IMAGE SAVE. For each image the script calls `page.fetch(src, {saveAs})` into
+  `img-<n>` inside the per-call temp dir (`ARGS.image_dir`); a failed fetch is a
+  `client` failure. The ok line lists the paths in `images`. Python accepts a
+  path only if it is a regular, non-symlink file directly inside that temp dir,
+  detects the format from magic bytes (PNG, WebP or JPEG; never from the name),
+  validates every file before copying any, then copies each into `out_dir` with
+  exclusive create. A missing, empty-list, outside or non-image file after an ok
+  result is a `SendUnconfirmedError` with the conversation URL.
+- IMAGE BUDGET. The subprocess budget is `timeout_s + 120 + 0.06 * len(prompt)`
+  seconds, plus 60 s for image runs. Image runs are never retried.

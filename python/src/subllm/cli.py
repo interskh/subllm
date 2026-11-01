@@ -5,14 +5,14 @@
     subllm complete-json  --client codex|claude|chatgpt-web [--schema schema.json] [PROMPT]
     subllm web-agent      --client codex|claude --model M [--tools web|none]
                           [--schema schema.json] [--timeout S] [PROMPT]
-    subllm image          --route codex -o OUT_DIR [PROMPT]
+    subllm image          --route codex|web -o OUT_DIR [--browser auto|ego|chrome] [PROMPT]
 
 PROMPT is read from the argument, or stdin when omitted / '-'.
 
 `web-agent` is the machine-facing entry point: one JSON document on stdout on
 success, and a typed error JSON on stdout (never stderr) on failure. The older
 subcommands keep their human-facing behaviour, errors on stderr. For
-`--client chatgpt-web` the stderr line is `error: <Type>: <message>`, and a
+`--client chatgpt-web` and `image --route web` the stderr line is `error: <Type>: <message>`, and a
 HumanActionRequired (log in, solve a challenge) exits 3.
 """
 from __future__ import annotations
@@ -183,11 +183,24 @@ def _run_web_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_web_error(e: SubllmError) -> int:
+    line = f"error: {type(e).__name__}: {_safe_str(e)}"
+    if isinstance(e, SendUnconfirmedError) and e.conversation_url:
+        line += f" (conversation: {e.conversation_url})"
+    sys.stderr.write(line + "\n")
+    return 3 if isinstance(e, HumanActionRequired) else 1
+
+
 def _run_image(args: argparse.Namespace) -> int:
-    from subllm.codex import CodexLLM
+    if args.route == "web":
+        from subllm.chatgpt_web import ChatGPTWebLLM
+        client = ChatGPTWebLLM(browser=args.browser or "auto")
+    else:
+        from subllm.codex import CodexLLM
+        client = CodexLLM()
 
     try:
-        result = CodexLLM().generate_image(_read_prompt(args.prompt), args.out_dir)
+        result = client.generate_image(_read_prompt(args.prompt), args.out_dir)
         document = _json_document({
             "paths": [str(p) for p in result.paths],
             "route": result.route,
@@ -196,6 +209,8 @@ def _run_image(args: argparse.Namespace) -> int:
             "served_model": result.served_model,
         })
     except SubllmError as e:
+        if args.route == "web":
+            return _report_web_error(e)
         sys.stderr.write(f"error: {type(e).__name__}: {_safe_str(e)}\n")
         return 1
     _write_json_line(document)
@@ -224,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("prompt", nargs="?", default=None)
 
     i = sub.add_parser("image")
-    i.add_argument("--route", required=True, choices=["codex"])
+    i.add_argument("--route", required=True, choices=["codex", "web"])
+    i.add_argument("--browser", default=None, choices=["auto", "ego", "chrome"])
     i.add_argument("-o", "--out-dir", required=True)
     i.add_argument("prompt", nargs="?", default=None)
 
@@ -237,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
                         parser.error(f"--{flag} is not supported with --client chatgpt-web")
             elif args.browser is not None:
                 parser.error("--browser is only supported with --client chatgpt-web")
+        if args.cmd == "image" and args.route == "codex" and args.browser is not None:
+            parser.error("--browser is only supported with --route web")
         if args.cmd == "web-agent":
             return _run_web_agent(args)
         if args.cmd == "image":
@@ -261,11 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "client", None) != "chatgpt-web":
             sys.stderr.write(f"error: {e}\n")
             return 1
-        line = f"error: {type(e).__name__}: {_safe_str(e)}"
-        if isinstance(e, SendUnconfirmedError) and e.conversation_url:
-            line += f" (conversation: {e.conversation_url})"
-        sys.stderr.write(line + "\n")
-        return 3 if isinstance(e, HumanActionRequired) else 1
+        return _report_web_error(e)
     except SystemExit as e:
         # argparse (bad args/choices) or _build_client raised SystemExit.
         return e.code if isinstance(e.code, int) else 2
