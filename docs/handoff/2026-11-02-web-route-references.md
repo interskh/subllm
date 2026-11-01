@@ -99,3 +99,10 @@
 - Browser trio (real ego lite + Chrome, codex/claude tripwires only): 349 passed, tripwire log empty.
 - Full hermetic suite (codex/claude/ego-browser tripwires first): 781 passed, 145 skipped, 1 failed. The failure was `test_codex_web.py::test_fixtures_are_sanitized` reading a stray `__pycache__` I had created in the fixtures dir; removed it, re-ran that file plus the privacy scan: 178 passed. Tripwire log empty.
 - Deviations from the brief: UUID rule scoped to `chatgpt_web/` fixtures (the 10 codex/claude `.jsonl` transcripts carry per-run session UUIDs); email check allows the reserved `@example.invalid`.
+
+## Whole-run gate fix round 2
+
+- Chip count (`attachments()` in page_core.js) now counts a Remove button only if it sits inside `[data-composer-attachments]` OR its label ends in a file extension (`/\.[A-Za-z0-9]{1,5}$/`); not tied to images, so a non-image file chip is still caught. A "Remove tool" pill outside the zone counts 0, so text sends proceed. Core tests (run on ego + chrome): tool pill = 0, extension chip outside the zone = 1, extensionless chip inside the zone = 1.
+- Sanitizer/test agreement: sanitize.py still emits `g-p-` + 32 zeros; the privacy scan now treats that all-zero id as synthetic (`g-p-(?!0{32})[0-9a-f]{32}`). New test runs the sanitizer on user/project tokens and asserts the output passes every scan check. The test execs sanitize.py source instead of importing it, so nothing writes a `__pycache__` into fixtures.
+- Mutations: drop the zone clause -> caught; drop the whole filter (count every Remove) -> caught (2 tests x 2 substrates).
+- Deferred: a pill that is BOTH inside the attachment zone and named "Remove x" would still count (never observed).

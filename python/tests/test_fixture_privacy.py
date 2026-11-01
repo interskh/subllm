@@ -8,7 +8,7 @@ FILES = sorted(p for p in ROOT.rglob("*") if p.is_file() and p.suffix != ".pyc" 
 
 CHECKS = {
     "user token": re.compile(r"user-[A-Za-z0-9]{16,}"),
-    "project token": re.compile(r"g-p-[0-9a-f]{32}"),
+    "project token": re.compile(r"g-p-(?!0{32})[0-9a-f]{32}"),
     "email": re.compile(r"[A-Za-z0-9._%+-]+@(?!example\.invalid)[A-Za-z0-9-]+\.[A-Za-z]{2,}"),  # .invalid is the reserved synthetic placeholder
     "home path": re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/"),
 }
@@ -31,3 +31,18 @@ def test_fixture_has_no_private_identifiers(path):
         return
     real = [u for u in UUID.findall(text) if not SYNTHETIC_UUID.fullmatch(u)]
     assert not real, f"{path.name}: {len(real)} non-synthetic UUID(s)"
+
+
+def test_sanitizer_output_for_ids_passes_the_scan():
+    path = ROOT / "chatgpt_web" / "sanitize.py"
+    ns: dict = {"__name__": "sanitize_under_test"}
+    exec(compile(path.read_text(), str(path), "exec"), ns)  # no import: it would write a __pycache__ into fixtures/
+    mod = type("M", (), ns)
+    raw = (
+        '<html data-theme-user-id="user-' + "A1b2" * 5 + '" data-sidebar-project-id="g-p-' + "a1" * 16
+        + '" data-x="g-p-' + "b2" * 16 + '"></html>'
+    )
+    out = mod.sanitize(raw, set())
+    assert "a1a1" not in out and "A1b2" not in out
+    for name, rx in CHECKS.items():
+        assert not rx.search(out), name

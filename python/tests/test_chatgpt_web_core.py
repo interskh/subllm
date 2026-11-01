@@ -152,6 +152,22 @@ CHIP_WITHOUT_DATA_PREVIEW = (
 CHIP_WITHOUT_IMG = (
     "(() => { document.querySelectorAll('[data-composer-attachments] img').forEach(i => i.remove()); return true; })()"
 )
+TOOL_PILL_ONLY = (
+    "(() => { document.querySelectorAll('[data-composer-attachments] button').forEach(b => b.remove());"
+    " const f = document.querySelector('[data-composer-attachments]').closest('form');"
+    " const b = document.createElement('button'); b.setAttribute('aria-label', 'Remove tool');"
+    " f.insertBefore(b, f.firstChild); return true; })()"
+)
+EXTENSIONLESS_CHIP_OUTSIDE_ZONE = (
+    "(() => { const f = document.querySelector('[data-composer-attachments]').closest('form');"
+    " document.querySelectorAll('[data-composer-attachments] button').forEach(b => b.remove());"
+    " const b = document.createElement('button'); b.setAttribute('aria-label', 'Remove notes.pdf');"
+    " f.insertBefore(b, f.firstChild); return true; })()"
+)
+EXTENSIONLESS_CHIP_IN_ZONE = (
+    "(() => { document.querySelectorAll(\"button[aria-label^='Remove ']\")"
+    ".forEach(b => b.setAttribute('aria-label', 'Remove notes')); return true; })()"
+)
 ALERT_IN_ZONE = (
     "(() => { const a = document.createElement('div'); a.setAttribute('role', 'alert');"
     " document.querySelector('[data-composer-attachments]').appendChild(a); return true; })()"
@@ -356,6 +372,18 @@ GROUPS = [
     (READY, [
         ("pre_no_img", CHIP_WITHOUT_IMG),
         ("att_no_img", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_tool_pill", TOOL_PILL_ONLY),
+        ("att_tool_pill", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_zone_chip", EXTENSIONLESS_CHIP_IN_ZONE),
+        ("att_zone_chip", call("attachments")),
+    ]),
+    (READY, [
+        ("pre_file_label", EXTENSIONLESS_CHIP_OUTSIDE_ZONE),
+        ("att_file_label", call("attachments")),
     ]),
     (READY, [
         ("pre_alert", ALERT_IN_ZONE),
@@ -914,6 +942,12 @@ def test_uploading_chip_is_counted_but_pending(r):
 
 def test_finished_chip_is_ready(r):
     assert r["att_ready"] == {"count": 1, "pending": 0, "ready": 1, "failed": 0}
+
+
+def test_a_remove_tool_control_is_not_an_attachment_chip(r):
+    assert r["att_tool_pill"]["count"] == 0
+    assert r["att_file_label"]["count"] == 1
+    assert r["att_zone_chip"]["count"] == 1
 
 
 def test_a_chip_is_ready_only_with_a_data_image_preview(r):

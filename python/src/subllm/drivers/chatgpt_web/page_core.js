@@ -156,11 +156,14 @@
   const attachments = () => {
     const form = composerForm();
     if (!form) return { count: 0, pending: 0, ready: 0, failed: 0 };
-    const count = q(form, "button[aria-label^='Remove ']").length;
+    // Attachment chips only: Remove buttons inside the attachment zone, or (zone-less layouts) ones
+    // labelled with a file name. Other "Remove ..." controls (a selected-tool pill) are not chips.
+    const zone = form.querySelector("[data-composer-attachments]");
+    const count = new Set(q(form, "button[aria-label^='Remove ']").filter((b) =>
+      (zone && zone.contains(b)) || /\.[A-Za-z0-9]{1,5}$/.test(b.getAttribute("aria-label")))).size;
     const bars = q(form, "[role=progressbar][aria-label^='Uploading']").length;
     const blobs = q(form, "[data-composer-attachments] img").filter((i) => /^blob:/.test(i.getAttribute("src") || "")).length;
     const pending = Math.max(bars, blobs);
-    const zone = form.querySelector("[data-composer-attachments]");
     const failed = zone ? q(zone, "[role=alert]").length + (ATTACH_ERROR_RE.test(zone.innerText || "") ? 1 : 0) : 0;
     // A chip is ready only on a positive signal: its preview has been swapped to a data: image.
     const loaded = zone ? q(zone, "img").filter((i) => /^data:image\//.test(i.getAttribute("src") || "")).length : 0;
