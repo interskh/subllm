@@ -529,3 +529,13 @@ implement-loop: slice 4 shipped d96d7eb; remaining: [5]
 ### Slice 5 gate fixes (cycle 2)
 
 - `runPicker` now re-checks `pickerAbort` right after the `selectMode` await, before any click/focus/key, so a planner call that returns after the 15 s bound does no input (cycle 1 only checked at loop top). Test `test_restore_waking_after_the_bound_does_no_input`; the ego harness fake timer logs `bound`. Mutant (check removed) caught; tests/ego_run.js only.
+
+### Slice 5 gate
+- Tasks: T1 a922735 (driver mode selection + audit, lean), T2 87bed38 (client/CLI mode+plan, reviewed: public API contracts, PASS, 0 fix rounds), T3 0331144 (served-model label from the Try again menu + docs, lean; gate reviews it).
+- Whole-run reviewer: BLOCK (a picker restore after the printed result could turn a delivered answer into SendUnconfirmedError; restore target lost on a mid-loop throw) -> fixed in 410c41d -> PASS; residual (a late-waking restore could still do one input) fixed in 5031161 -> PASS. Codex: 1 MAJOR + 2 MINOR (same two restore defects; post-selection login wall/challenge mapped to ClientError), all fixed in 410c41d; its re-check found the same late-input residual, fixed in 5031161. Two of two fix cycles used.
+- Full hermetic suite at 5031161 (tripwire stubs for codex/claude/ego-browser first on PATH, no SUBLLM_* env): 675 passed, 119 skipped; tripwire log empty on every clean run. Tripwire hits occurred only from deliberate mutants in T2's battery (codex rejection removed), which is the tripwire doing its job. Browser fixture tests (SUBLLM_BROWSER=1, real ego lite + headless Chrome, network aborted) at 0331144: 106 passed (53 per substrate); page_core.js unchanged since.
+- Live: one Pro turn through `subllm complete --client chatgpt-web --mode pro --plan pro` rc 0 (~41 s); one thinking turn through the Python API, served_model "6 Thinking" (18 s). No login wall, no challenge, Work never selected. Picker restored to Medium after both.
+- Privacy scan 89b82fa..HEAD: clean (author-identity warning only).
+- Deferred: Chrome picker restore failure is silent (no log channel); an input already in flight when the 15 s restore bound fires still completes (no Enter step, cannot send); the T3 menu read on a live Pro turn and every picker change on Chrome are unverified live (fixtures cover them); a real downgrade has not been observed; a downgraded Pro image call saves no images (documented); legacy layout has no picker support (fails closed); default mode reports served_model None on this layout. Earlier slices' deferred items remain open.
+
+implement-loop: slice 5 shipped 5031161; remaining: []
