@@ -133,3 +133,9 @@ def test_quota_before_keypress_never_touches_codex(ego, fake_bin, tmp_path):
         ChatGPTWebLLM().complete("q")
     assert not (ego.dir / "codex_ran").exists()
     assert os.environ["HOME"] == str(tmp_path)
+
+
+def test_empty_prompt_is_client_error_before_any_ego_call(ego):
+    with pytest.raises(ClientError, match="empty"):
+        ChatGPTWebLLM().complete("  \n\t ")
+    assert not (ego.dir / "calls").exists()

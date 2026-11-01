@@ -539,11 +539,14 @@ Spec: `docs/superpowers/specs/2026-10-31-subllm-chatgpt-image-and-web-design.md`
 web app in a real logged-in browser; it never calls `backend-api` directly.
 
 - PAGE CORE (D-3). All chatgpt.com knowledge lives in `page_core.js`, pure
-  functions run in the page through `evaluate`: `state()` (logged_in, challenge,
-  mode_surface, layout, busy), `selectMode`, `composerMatches(prompt)`,
+  functions run in the page through `evaluate`: `state()` (logged_in, login_prompt,
+  challenge, mode_surface, layout, busy, quota), `composerMatches(prompt)`,
   `acceptance()` (pending | accepted | rejected, turn_key, conversation_url),
   `turnStatus(turn_key)`, `captureText(turn_key)` (Copy-button markdown, falls
-  back to `innerText`), `servedModel(turn_key)`. The core never generates input.
+  back to `innerText`), `servedModel(turn_key)`. The core never generates input. `selectMode` arrives with modes in a later
+  release. Error-text scans (`acceptance` rejection, `turnStatus.error_dialog`)
+  skip the user message and the assistant answer body, so a prompt or answer
+  that starts with "Unknown error" is not read as a failure.
 - INPUT (D-3a). Bring the tab to front (`Page.bringToFront`), type with per-key
   events and a 40 ms delay, send with Enter. Never `insertText` or paste: a
   filled-without-keys composer was rejected by the server (403 on `prepare`).
@@ -563,9 +566,9 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   report usage guide major `2`; any other major is a `ClientError` naming both
   versions, never a fallback, even under `browser="auto"`.
 - ONE SEND PER CALL (D-6). Every call starts in a new chat (confirm no `/c/` in
-  the URL before typing). No retry anywhere. Phases split at the Enter keypress
-  and at server acceptance: before the key, failures are `ClientError`,
-  `QuotaError` or `HumanActionRequired`; after the key, only a positive rejection
+  the URL before typing). No retry anywhere. Phases split at the first typed key
+  (the keypress record, below) and at server acceptance: before it, failures are `ClientError`,
+  `QuotaError` or `HumanActionRequired`; after it, only a positive rejection
   is `ClientError`; everything else that does not end in a result is
   `SendUnconfirmedError` (with the conversation URL when accepted). Calls are
   serialized per machine by an exclusive `flock` on
@@ -597,13 +600,19 @@ web app in a real logged-in browser; it never calls `backend-api` directly.
   `client` failure with that event to "send rejected; not resent". Exactly one
   `SUBLLM_RESULT` per run; the exit status is authoritative, so an `ok: true` line
   with a non-zero exit is not trusted.
-- DURABLE KEYPRESS RECORD. Before the Enter keypress (and before stopping on an
-  early send, see below) the script writes `KEYPRESS_FILE` synchronously. The
+- DURABLE KEYPRESS RECORD. Right before the FIRST typed key (any key event can
+  send early, e.g. a lost Shift on Shift+Enter) the script writes `KEYPRESS_FILE`
+  synchronously, once per run, and emits the keypress event. The
   parent reads that file, not the stream, to decide whether a send may have
   happened. File present and no usable result is `SendUnconfirmedError`; file
   absent and no result is `ClientError` with the stderr tail.
-- EARLY SEND. After typing, the script checks for a `/c/` URL BEFORE the composer
-  text check: if the page already opened a chat, a send may have happened, so it
-  writes the record and stops with "chat opened before the send key". Checking
-  the composer first would see the emptied editor, fail without a record, and
-  make a sent prompt look unsent.
+- EARLY SEND. Because the record already exists, every failure after typing starts
+  (a throwing typing or URL call, a composer mismatch, a `/c/` URL before Enter)
+  is a `SendUnconfirmedError`, never a plain `ClientError` for a possibly sent
+  prompt. The `/c/` check still runs BEFORE the composer check so the detail
+  reads "chat opened before the send key".
+- NOT-READY PAGE. A page that never shows the composer is a `human_action` only
+  when `state()` reports `challenge` or `login_prompt`; otherwise it is a
+  `ClientError` ("chatgpt.com did not become ready") and no hand-off happens.
+- EMPTY PROMPT. A prompt that is empty after normalization is a `ClientError`
+  before any subprocess or lock.

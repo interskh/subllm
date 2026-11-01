@@ -243,10 +243,24 @@ def test_early_chat_with_record_is_unconfirmed(ego):
         run()
 
 
-def test_early_chat_branch_writes_record_before_stopping():
+def test_record_is_written_once_before_the_first_typed_key():
     body = script()
-    i = body.index("chat opened before the send key")
-    assert body.rindex("record();", 0, i) > body.rindex("isChat()", 0, i)
+    assert body.count("record();") == 1
+    assert body.index("record();") < body.index("keyboard.type")
+    assert body.index("record();") < body.index('keyboard.press("Enter")')
+
+
+def test_composer_mismatch_with_record_is_unconfirmed(ego):
+    ego(fail("client", "composer text does not match the prompt"), keypress=True, code=1)
+    with pytest.raises(SendUnconfirmedError):
+        run()
+
+
+def test_empty_prompt_is_client_error_before_any_subprocess(ego):
+    for prompt in ("", " \t\r\n "):
+        with pytest.raises(ClientError, match="empty"):
+            run(prompt)
+    assert not (ego.dir / "ran").exists() and not (ego.dir / "script.js").exists()
 
 
 def test_answer_deadline_starts_after_enter():
@@ -350,7 +364,7 @@ const __page = {
   evaluate: async (expr) => {
     if (expr.startsWith("!!document")) return true;
     const call = expr.slice(-80);
-    if (call.includes(").state(")) return { logged_in: true, mode_surface: "chat", busy: false, quota: false };
+    if (call.includes(").state(")) return { logged_in: true, login_prompt: false, mode_surface: "chat", busy: false, quota: false };
     if (call.includes(").composerMatches(")) return false;
     throw new Error("unexpected evaluate: " + call);
   },
@@ -404,3 +418,68 @@ def test_goto_failure_before_commit_is_client_without_record(tmp_path):
     assert not kp.exists()
     assert len(results) == 1 and results[0]["kind"] == "client"
     assert "EGO_PAGE_UNRESPONSIVE" in results[0]["detail"]
+
+
+def _run_variant(tmp_path, *swaps):
+    kp = tmp_path / "keypress"
+    body = build_script("hi", space="subllm-chatgpt-abcd1234", timeout_ms=1000, keypress_file=str(kp))
+    runtime = _FAKE_RUNTIME
+    for old, new in swaps:
+        assert old in runtime, old
+        runtime = runtime.replace(old, new)
+    prog = tmp_path / "run.js"
+    prog.write_text(runtime + "(async () => {\n" + body + "\n})();\n")
+    p = subprocess.run(["node", str(prog)], capture_output=True, text=True, timeout=60)
+    return kp, p.stdout, parse_output(p.stdout)[1]
+
+
+_TYPE_OK = "    type: async () => { __typed.done = true; },"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_typing_rpc_throwing_after_an_early_send_still_leaves_the_record(tmp_path):
+    kp, out, results = _run_variant(
+        tmp_path, (_TYPE_OK, "    type: async () => { __typed.done = true; throw new Error('RPC_LOST'); },")
+    )
+    assert kp.exists() and "PRESSED_ENTER" not in out
+    assert len(results) == 1 and results[0]["kind"] == "client" and "RPC_LOST" in results[0]["detail"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_composer_mismatch_leaves_record_and_never_presses_enter(tmp_path):
+    kp, out, results = _run_variant(tmp_path, (_TYPE_OK, "    type: async () => {},"))
+    assert kp.exists() and "PRESSED_ENTER" not in out
+    assert len(results) == 1 and "composer text does not match" in results[0]["detail"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_never_loaded_page_is_client_error_not_a_login_wall(tmp_path):
+    kp, out, results = _run_variant(
+        tmp_path,
+        ("const __typed", "let __t = Date.now(); Date.now = () => (__t += 1000);\nconst __typed"),
+        ("logged_in: true, login_prompt: false", "logged_in: false, login_prompt: false"),
+        ("handOff: async () => {}", "handOff: async () => { console.log('HANDOFF'); }"),
+    )
+    assert not kp.exists() and "HANDOFF" not in out
+    assert len(results) == 1 and results[0]["kind"] == "client"
+    assert "did not become ready" in results[0]["detail"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_login_prompt_is_a_human_action_with_hand_off(tmp_path):
+    kp, out, results = _run_variant(
+        tmp_path,
+        ("logged_in: true, login_prompt: false", "logged_in: false, login_prompt: true"),
+        ("handOff: async () => {}", "handOff: async () => { console.log('HANDOFF'); }"),
+    )
+    assert not kp.exists() and "HANDOFF" in out
+    assert results[0]["kind"] == "human_action"
+
+
+def test_fcntl_is_not_imported_at_module_level():
+    import ast
+    import subllm.drivers.chatgpt_web.ego as mod
+
+    tree = ast.parse(open(mod.__file__).read())
+    top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert not any(a.name == "fcntl" for n in top if isinstance(n, ast.Import) for a in n.names)

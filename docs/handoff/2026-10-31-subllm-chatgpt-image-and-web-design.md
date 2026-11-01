@@ -190,3 +190,20 @@ implement-loop: slice 1 shipped 815ee5a; remaining: [2, 3, 4, 5]
 - Live call 1 failed before the send (no quota): `page.goto` waits for `load` (15 s) and chatgpt.com stayed `interactive`. The script now uses `waitUntil: "domcontentloaded"` (probe: returns in ~9 s) and ignores a goto timeout whose message says the navigation committed; the 45 s state loop is the real wait. Any other goto error stays a pre-send `client` failure. Node-harness tests for both; 3/3 mutants caught.
 - Live call 2: `SUBLLM_LIVE=1 SUBLLM_WEB=1 uv run pytest -m integration -k chatgpt_web` PASSED (23 s). Live call 3: `uv run subllm complete --client chatgpt-web "<one-token prompt>"` printed the token, rc 0 (21 s). No login wall or challenge.
 - T2 assumptions discharged: the ego runtime writes the keypress record under the system temp dir (probe plus both live sends, which return ok only with the record present); `ego-browser skill` prints `usage guide v2.2.0` and `check_guide` passed live; `task.handOff()` is listed in the v2.2.0 guide (not exercised live: no login wall). Note: the guide says not to call `finish()` when a task stops for an error; the script follows spec D-4 (finish on every outcome except human_action).
+
+### Slice 2 gate fixes
+
+**Decisions**
+- `errorText` skips an element if it is inside, or contains, a user message or assistant answer body. The "contains" half matters: a wrapper whose innerText starts with a prompt like "Something went wrong..." would otherwise match. The real "Unknown error" element is a leaf outside both, so synthetic-rejected-send is still rejected (browser-tested).
+- The keypress record and event are written once, right before the first typed key; the old pre-Enter and early-chat record calls are gone. The `/c/` check still runs before `composerMatches` for the clearer detail; both now map to SendUnconfirmedError.
+- Empty-after-normalize prompt is a ClientError in both `ChatGPTWebLLM.complete_result` (before detection) and `EgoDriver.run_text` (before the lock).
+- `state().login_prompt` is the login control only. Human action needs `challenge` or `login_prompt`; otherwise `client` "chatgpt.com did not become ready", no hand-off. The wait loop also exits early on `login_prompt`.
+- `fcntl` is imported inside `run_text`. Tested by AST (other stdlib/deps already put fcntl in sys.modules, so a sys.modules check cannot work).
+- Fixtures added: synthetic-prompt-error-pending, synthetic-rejected-send-error-prompt, synthetic-completed-error-words.
+
+**Rejected**
+- Excluding only ancestors (`closest`): misses wrapper divs whose text starts with the prompt.
+- Making the never-loaded node test wait 45 s: the fake runtime advances `Date.now` by 1 s per call instead.
+
+**Deferred** (out of scope per the orchestrator)
+- flock OSError other than EWOULDBLOCK; `WebTextResult.conversation_url` typing (str vs None); `finish()` after an error.

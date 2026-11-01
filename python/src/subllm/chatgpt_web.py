@@ -5,7 +5,7 @@ from typing import Any
 
 from subllm.base import BaseLLM, WebTextResult
 from subllm.codex import _JSON_INSTRUCTION, _parse_json_object
-from subllm.drivers.chatgpt_web.ego import EgoDriver
+from subllm.drivers.chatgpt_web.ego import EgoDriver, normalize_prompt
 from subllm.errors import ClientError, OutputError
 from subllm.preflight import RegionGuard
 
@@ -57,6 +57,8 @@ class ChatGPTWebLLM(BaseLLM):
     def complete_result(self, prompt: str) -> WebTextResult:
         if self._guard is not None:
             self._guard.check()  # RegionError before any browser subprocess
+        if not normalize_prompt(prompt).strip():
+            raise ClientError("the prompt is empty")
         driver = self._resolve_driver()
         driver.check_guide()
         result = driver.run_text(prompt, timeout_s=self._timeout_s)

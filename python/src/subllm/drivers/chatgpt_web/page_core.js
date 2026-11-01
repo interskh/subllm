@@ -71,8 +71,14 @@
     }
     return null;
   };
+  const MESSAGE_SEL = [
+    "[data-content-search-unit-key$=':user']", "[data-message-author-role=user]",
+    "[data-user-message-bubble]", "[data-conversation-role=user]",
+    "[data-markdown-text-style='assistant-message']", ".markdown", "[data-message-author-role=assistant]",
+  ].join(", ");
   const errorText = (root) => {
     for (const el of q(root, "div, span, p, [role=alert]")) {
+      if (el.closest(MESSAGE_SEL) || el.querySelector(MESSAGE_SEL)) continue;
       const t = (el.innerText || "").trim();
       if (t.length > 0 && t.length < 200 && ERROR_RE.test(t) && rendered(el)) return t;
     }
@@ -104,6 +110,7 @@
     }
     return {
       logged_in: !!composer && !login,
+      login_prompt: !!login,
       challenge,
       mode_surface: mode,
       layout: layoutOf(),

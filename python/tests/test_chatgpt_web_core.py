@@ -142,6 +142,15 @@ GROUPS = [
         ("acc_other_path", call("acceptance", "https://chatgpt.com/c/not-a-uuid")),
         ("acc_rejected_server_url", call("acceptance", f"https://chatgpt.com/c/{UUID}")),
     ]),
+    ("synthetic-prompt-error-pending.html", [
+        ("acc_prompt_error", call("acceptance", f"https://chatgpt.com/c/local-chatgpt%3A{UUID}")),
+    ]),
+    ("synthetic-rejected-send-error-prompt.html", [
+        ("acc_rejected_error_prompt", call("acceptance", f"https://chatgpt.com/c/local-chatgpt%3A{UUID}")),
+    ]),
+    ("synthetic-completed-error-words.html", [
+        ("error_words_probe", SETTLED % (json.dumps(KEY), json.dumps(KEY))),
+    ]),
 ]
 
 
@@ -353,3 +362,23 @@ def test_composer_matches_normalises_both_sides(r):
 
 def test_served_model_is_null_on_redesign(r):
     assert r["model"] is None
+
+
+def test_login_prompt_flag(r):
+    assert r["out_state"]["login_prompt"] is True
+    assert r["idle_state"]["login_prompt"] is False
+    assert r["challenge_state"]["login_prompt"] is False
+
+
+def test_prompt_starting_with_an_error_phrase_is_not_a_rejection(r):
+    assert r["acc_prompt_error"]["state"] == "pending"
+
+
+def test_real_error_element_is_still_a_rejection_with_an_error_phrase_prompt(r):
+    assert r["acc_rejected_error_prompt"]["state"] == "rejected"
+
+
+def test_prompt_and_answer_starting_with_unknown_error_are_not_an_error_dialog(r):
+    p = r["error_words_probe"]
+    assert p["error_dialog"] is None
+    assert p["done"] is True

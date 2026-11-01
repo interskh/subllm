@@ -6,7 +6,6 @@ send key may have been pressed (the keypress record exists) nothing is retried.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import re
 import secrets
@@ -123,6 +122,10 @@ class EgoDriver:
 
     def run_text(self, prompt: str, *, timeout_s: float) -> WebTextResult:
         prompt = normalize_prompt(prompt)
+        if not prompt.strip():
+            raise ClientError("the prompt is empty")
+        import fcntl
+
         path = lock_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

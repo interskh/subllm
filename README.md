@@ -11,7 +11,7 @@ can swap a per-token client (e.g. `GeminiLLM`) for a subscription-native one wit
 no call-site changes.
 
 **Status:** v1 implemented (CodexLLM + ClaudeLLM + FallbackLLM + CLI), plus an
-opt-in ChatGPT web route for text (`ChatGPTWebLLM`). 451 hermetic tests passing,
+opt-in ChatGPT web route for text (`ChatGPTWebLLM`). 461 hermetic tests passing,
 plus an opt-in live suite — the codex and claude paths verified end-to-end against
 live subscriptions.
 
@@ -358,7 +358,7 @@ A minimal CLI for smoke-testing and shell-out from non-Python projects:
 ```bash
 subllm complete       --client codex|claude  [--model M] [--effort E] [PROMPT]
 subllm complete-json  --client codex|claude  [--schema schema.json] [PROMPT]
-subllm complete       --client chatgpt-web [--browser auto|ego] [PROMPT]
+subllm complete       --client chatgpt-web [--browser auto|ego|chrome] [PROMPT]
 subllm web-agent      --client codex|claude  --model M [--tools web|none]
                       [--schema schema.json] [--timeout S] [PROMPT]
 subllm image          --route codex -o OUT_DIR [PROMPT]
@@ -372,7 +372,8 @@ exit code. Example:
 CODEX_HOME=/tmp/codex-clean subllm complete --client codex "Say hello in five words."
 ```
 
-With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
+`--browser chrome` is accepted but fails with `ClientError` until the Chrome
+driver lands. With `--client chatgpt-web`, `--effort` and `--model` are rejected (exit 2), and
 `--browser` is rejected for the other clients. Errors print
 `error: <Type>: <message>` to stderr and exit 1; `HumanActionRequired` exits 3
 so a wrapper can prompt the user to log in.
@@ -429,7 +430,7 @@ on `PATH`, so it never touches a real subscription or the network:
 
 ```bash
 cd python
-uv run pytest                 # no subscription, no network (451 passed, 37 skipped)
+uv run pytest                 # no subscription, no network (461 passed, 41 skipped)
 ```
 
 The web-agent parsers are tested the same way: their fixtures are **sanitized
