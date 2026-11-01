@@ -397,3 +397,4 @@ implement-loop: slice 3 shipped 6d015d2; remaining: [4, 5]
 - Launch itself (`_open_context` enter) is not under the timer. Login helper ends when the first tab closes. Any flock OSError is treated as "lock held" and now affects both drivers.
 
 **Touches**: chrome.py, conftest.py, test_chatgpt_web_chrome.py, test_chatgpt_web_llm.py, README.md, docs/drivers-contract.md. Mutants: 8/8 caught (timer not armed, wrong pid, no signal, expired dropped, ~/Applications accepted, reason without extra, challenge text, profile message always).
+- Cycle 2: the timer callback runs its kill under a `threading.Lock` gate and the finish path takes the same gate (setting `finished`) before closing Chrome, so a callback can neither outlive the call nor kill a later call's browser; one test + one mutant (finish without the gate) caught.

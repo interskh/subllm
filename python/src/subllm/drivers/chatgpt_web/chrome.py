@@ -215,11 +215,19 @@ class ChromeDriver:
         budget = _budget(timeout_s, prompt, kind)
         expired: list[str] = []
 
+        gate = threading.Lock()
+        finished = False
+
         def _fire() -> None:
-            rec.dead = True
-            expired.append(f"Chrome timed out after {budget:.0f}s")
-            with contextlib.suppress(Exception):
-                _kill_browser(profile)
+            # the kill happens under the gate, so the call cannot finish (close Chrome, free the
+            # lock) while it runs, and a callback that wakes after the finish does nothing
+            with gate:
+                if finished:
+                    return
+                rec.dead = True
+                expired.append(f"Chrome timed out after {budget:.0f}s")
+                with contextlib.suppress(Exception):
+                    _kill_browser(profile)
 
         # a frozen renderer blocks evaluate forever; only killing the browser frees it
         timer = threading.Timer(budget, _fire)
@@ -234,6 +242,8 @@ class ChromeDriver:
                 result = _fail(rec, "client", f"{type(e).__name__}: {e}")
         finally:
             timer.cancel()
+            with gate:
+                finished = True
             with contextlib.suppress(Exception):
                 stack.close()
         if not rec.sent and not result.get("ok") and result.get("kind") == "human_action":

@@ -796,3 +796,27 @@ def test_kill_signals_only_the_profile_pid(monkeypatch, tmp_path):
     sent.clear()
     _REAL_KILL(tmp_path / "other")
     assert sent == []
+
+
+def test_call_does_not_finish_while_the_kill_callback_is_running(chrome, monkeypatch):
+    page = chrome()
+    orig = page.evaluate
+    state = {"entered": threading.Event(), "done": False}
+
+    def slow(expr, **kw):
+        if expr[len(_CORE) + 3 :].startswith("captureText"):
+            assert state["entered"].wait(5), "timer never fired"
+        return orig(expr, **kw)
+
+    page.evaluate = slow
+
+    def kill(profile):
+        state["entered"].set()
+        time.sleep(0.4)
+        state["done"] = True
+
+    monkeypatch.setattr(mod, "_budget", lambda *a: 0.1)
+    monkeypatch.setattr(mod, "_kill_browser", kill)
+    assert run().text == "hello"
+    assert state["done"], "the call returned while the kill callback was still running"
+    time.sleep(0.2)
