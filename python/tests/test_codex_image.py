@@ -310,11 +310,18 @@ def test_no_references_means_no_image_flag(env):
     assert "-i" not in (log / "argv.txt").read_text().splitlines()
 
 
-def test_missing_reference_is_client_error_before_codex_runs(env, tmp_path):
+def test_bad_reference_is_client_error_before_codex_runs(env, tmp_path):
     log, out, _ = env
-    with pytest.raises(ClientError, match="reference"):
-        CodexLLM().generate_image("x", out, references=[tmp_path / "nope.png"])
-    with pytest.raises(ClientError, match="reference"):
-        CodexLLM().generate_image("x", out, references=[tmp_path])
+    comma = tmp_path / "a,b.png"
+    comma.write_bytes(PNG)
+    unreadable = tmp_path / "locked.png"
+    unreadable.write_bytes(PNG)
+    unreadable.chmod(0)
+    bad = [tmp_path / "nope.png", tmp_path, comma, "~no-such-user-xyz/ref.png"]
+    if os.getuid() != 0:
+        bad.append(unreadable)
+    for ref in bad:
+        with pytest.raises(ClientError, match="reference"):
+            CodexLLM().generate_image("x", out, references=[ref])
     assert not (log / "calls.txt").exists()
     assert not out.exists() or list(out.iterdir()) == []

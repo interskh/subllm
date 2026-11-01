@@ -51,8 +51,11 @@ mode is Python-only today; TS parity is deferred (§7 of that spec).
   - The prompt is prefixed with a fixed instruction to call the image tool
     exactly once and not answer with SVG/HTML/code.
   - `references` become `-i <absolute path>` pairs before `--` (absolute because
-    the cwd is the throwaway work dir); each must be an existing file, checked
-    before the subprocess starts (ClientError).
+    the cwd is the throwaway work dir). `CodexLLM.generate_image` checks each
+    one before the subprocess starts (readable regular file, no ',' because clap
+    splits `-i` values on commas; ClientError otherwise). codex itself ignores a
+    missing `-i` file silently (verified on codex-cli 0.166.0), so
+    `run_codex_exec(images=...)` callers must validate themselves.
   - Zero files collected => OutputError. One attempt, no retry.
 
 ## claude_tmux

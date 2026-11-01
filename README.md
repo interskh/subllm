@@ -505,8 +505,9 @@ also a usage error (exit 2). A `ModelDowngradeError` prints
 `served_model`) to stdout. On failure it prints `error: <Type>: <message>` to
 stderr and exits 1. `--ref FILE` (repeatable) attaches reference images on the
 codex route and is rejected for `--route web` (exit 2). With `--route web`,
-`--browser` selects the browser (rejected for `--route codex`, exit 2), a `SendUnconfirmedError` line ends with
-`(conversation: <url>)`, and `HumanActionRequired` exits 3.
+`--browser` selects the browser (rejected for `--route codex`, exit 2), a
+`SendUnconfirmedError` line ends with `(conversation: <url>)`, and
+`HumanActionRequired` exits 3.
 
 ### `web-agent` (machine-facing)
 
