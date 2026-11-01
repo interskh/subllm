@@ -6,15 +6,24 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from subllm.base import BaseLLM, _retry, _validate_with_model
+from subllm._images import prepare_out_dir, save_numbered
+from subllm.base import BaseLLM, ImageGenerator, ImageResult, _retry, _validate_with_model
 from subllm.drivers.codex_exec import run_codex_exec
-from subllm.errors import OutputError
+from subllm.drivers.codex_web import run_codex_web_task
+from subllm.errors import ClientError, OutputError
 from subllm.preflight import RegionGuard
+from subllm.webagent import WebAgentResult
 
 _JSON_INSTRUCTION = "\n\nReturn ONLY a single JSON object. No prose, no code fence."
 
+_IMAGE_INSTRUCTION = (
+    "Call the image generation tool exactly once to create the image described "
+    "below. Do not answer with SVG, HTML, or code. After the tool finishes, "
+    "reply with one word.\n\n"
+)
 
-class CodexLLM(BaseLLM):
+
+class CodexLLM(BaseLLM, ImageGenerator):
     def __init__(
         self,
         model: str | None = None,
@@ -73,6 +82,86 @@ class CodexLLM(BaseLLM):
             # Don't trust codex's binding blindly — validate against the model.
             return _validate_with_model(parsed, schema_model)
         return _retry(_call, attempts=self._attempts)
+
+    def generate_image(self, prompt: str, out_dir: str | Path) -> ImageResult:
+        """One image turn. ONE attempt, no retry: a refusal or timeout would
+        re-spend ~46 s and Codex quota per attempt; the caller decides."""
+        if self._guard is not None:
+            self._guard.check()  # RegionError before any subprocess
+        dest = prepare_out_dir(out_dir)
+        saved: list[Path] = []
+
+        def _collect(files: list[Path]) -> None:
+            if not files:
+                raise OutputError("codex produced no image (the agent did not call the image tool)")
+            saved.extend(save_numbered([(f, f.suffix.lower()) for f in files], dest))
+
+        text = run_codex_exec(
+            _IMAGE_INSTRUCTION + prompt,
+            model=self._model,
+            reasoning_effort=self._effort,
+            codex_home=self._codex_home,
+            timeout_s=max(self._timeout_s, 300),
+            collect_images=_collect,
+        )
+        return ImageResult(
+            paths=saved, route="codex", text=text,
+            conversation_url=None, served_model=None,
+        )
+
+    def run_web_task(
+        self,
+        prompt: str,
+        schema_model: type | None = None,
+        *,
+        tools: str = "web",
+        timeout_s: int = 300,
+    ) -> WebAgentResult:
+        """One isolated web-agent turn (§4.1). ONE attempt, no retry (D-4a): a
+        silent re-run would return a different browsing session than the one the
+        consumer timed and grades."""
+        if self._guard is not None:
+            self._guard.check()  # RegionError before any subprocess
+        if not self._model:
+            raise ClientError("web-agent mode requires an explicit model")
+
+        schema_path: str | None = None
+        if schema_model is not None:
+            schema = json.dumps(_to_strict_schema(schema_model.model_json_schema()))
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".json", delete=False
+            ) as f:
+                f.write(schema)
+                schema_path = f.name
+        try:
+            run = run_codex_web_task(
+                prompt,
+                model=self._model,
+                tools=tools,
+                schema_path=schema_path,
+                timeout_s=timeout_s,
+            )
+        finally:
+            if schema_path:
+                Path(schema_path).unlink(missing_ok=True)
+
+        answer: str | dict[str, Any] = run.answer
+        if schema_model is not None:
+            # Don't trust codex's binding blindly — validate, as the text path
+            # does. A schema miss is an OutputError, not a retry (D-4a).
+            answer = _validate_with_model(_parse_json_object(run.answer), schema_model)
+
+        return WebAgentResult.build(
+            client="codex",
+            model=self._model,
+            answer=answer,
+            trace=run.trace,
+            fetch_events_exposed=True,  # measured: page opens appear in the rollout
+            trace_complete=run.trace_complete,
+            tools=tools,
+            client_version=run.client_version,
+            duration_ms=run.duration_ms,
+        )
 
 
 def _to_strict_schema(node: Any) -> Any:

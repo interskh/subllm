@@ -1,7 +1,7 @@
 import pytest
 from subllm.fallback import FallbackLLM
 from subllm.base import BaseLLM
-from subllm.errors import QuotaError, OutputError
+from subllm.errors import IsolationError, QuotaError, OutputError
 
 
 class _Stub(BaseLLM):
@@ -53,6 +53,17 @@ def test_does_not_fall_back_on_output_error():
     backup = _Stub(text="backup")
     llm = FallbackLLM(primary, backup)
     with pytest.raises(OutputError):
+        llm.complete("x")
+    assert backup.calls == 0
+
+
+def test_does_not_fall_back_on_isolation_error():
+    # D-5: an isolation violation is a hard stop — the other client is no safer,
+    # and a fallback would hide the violation behind a clean-looking answer.
+    primary = _Stub(raises=IsolationError("non-web tool event"))
+    backup = _Stub(text="backup")
+    llm = FallbackLLM(primary, backup)
+    with pytest.raises(IsolationError):
         llm.complete("x")
     assert backup.calls == 0
 
