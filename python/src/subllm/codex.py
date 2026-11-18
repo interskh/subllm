@@ -1,6 +1,7 @@
 """CodexLLM — primary client. Wraps `codex exec` behind the BaseLLM contract."""
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 from pathlib import Path
@@ -172,18 +173,26 @@ class CodexLLM(BaseLLM, ImageGenerator):
         )
 
 
-def _to_strict_schema(node: Any) -> Any:
+def _to_strict_schema(
+    node: Any, _root: Any = None, _inlining: tuple[str, ...] = ()
+) -> Any:
     """Rewrite an ordinary JSON Schema in place so codex's strict
     Structured-Outputs validator accepts it: every object node gets
     `additionalProperties: false` and lists all its properties as `required`,
     and `default: null` hints (which Pydantic emits for `Optional[...] = None`)
     are dropped. Mirrors OpenAI's reference to_strict_json_schema for the shapes
-    Pydantic v2 produces — nested `$defs`, `anyOf` unions, bare `$ref` (no
-    sibling-`$ref` inlining, which Pydantic v2 doesn't emit). Returns `node`.
+    Pydantic v2 produces — nested `$defs`, `anyOf` unions, bare `$ref`, and a
+    `$ref` with sibling keywords (Pydantic emits `{"$ref", "description"}` for a
+    described nested-model field, and strict mode rejects it): that node is
+    replaced by an inlined copy of its definition with the siblings on top. A
+    `$ref` to a definition already being inlined (recursion) keeps the bare
+    pointer and loses its siblings, so inlining terminates. Returns `node`.
     """
+    if _root is None:
+        _root = node
     if isinstance(node, list):
         for item in node:
-            _to_strict_schema(item)
+            _to_strict_schema(item, _root, _inlining)
         return node
     if not isinstance(node, dict):
         return node
@@ -193,6 +202,18 @@ def _to_strict_schema(node: Any) -> Any:
     if "default" in node and node["default"] is None:
         del node["default"]
 
+    ref = node.get("$ref")
+    if isinstance(ref, str) and len(node) > 1:
+        target = _resolve_local_ref(_root, ref)
+        if target is not None and ref not in _inlining:
+            siblings = {k: v for k, v in node.items() if k != "$ref"}
+            node.clear()
+            node.update({**copy.deepcopy(target), **siblings})
+            _inlining = (*_inlining, ref)
+        elif target is not None:
+            for key in [k for k in node if k != "$ref"]:
+                del node[key]
+
     props = node.get("properties")
     if isinstance(props, dict):
         node["additionalProperties"] = False
@@ -201,13 +222,25 @@ def _to_strict_schema(node: Any) -> Any:
     for key in ("properties", "$defs", "definitions"):
         members = node.get(key)
         if isinstance(members, dict):
-            for sub in members.values():
-                _to_strict_schema(sub)
+            for name, sub in members.items():
+                inlining = _inlining
+                if key != "properties" and node is _root:
+                    inlining = (*_inlining, f"#/{key}/{name}")
+                _to_strict_schema(sub, _root, inlining)
 
     for key in ("anyOf", "allOf", "oneOf", "prefixItems", "items"):
-        _to_strict_schema(node.get(key))
+        _to_strict_schema(node.get(key), _root, _inlining)
 
     return node
+
+
+def _resolve_local_ref(root: Any, ref: str) -> dict | None:
+    """The definition a `#/$defs/<name>` (or `#/definitions/<name>`) ref names."""
+    parts = ref.split("/")
+    if len(parts) != 3 or parts[0] != "#" or parts[1] not in ("$defs", "definitions"):
+        return None
+    target = root.get(parts[1], {}).get(parts[2]) if isinstance(root, dict) else None
+    return target if isinstance(target, dict) else None
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:

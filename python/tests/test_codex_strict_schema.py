@@ -68,6 +68,60 @@ def test_strict_schema_handles_recursive_models_without_infinite_loop():
     assert node["properties"]["children"]["items"] == {"$ref": "#/$defs/_Node"}
 
 
+def _refs_with_siblings(node, path=""):
+    found = []
+    if isinstance(node, dict):
+        if "$ref" in node and len(node) > 1:
+            found.append(path)
+        for key, value in node.items():
+            found += _refs_with_siblings(value, f"{path}/{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            found += _refs_with_siblings(value, f"{path}/{i}")
+    return found
+
+
+class _Level(BaseModel):
+    level: str
+    reason: str
+
+
+class _Verdict(BaseModel):
+    headline: str
+    confidence: _Level = Field(description="How confident, with a reason.")
+
+
+def test_strict_schema_inlines_a_described_nested_model():
+    # Pydantic v2 emits `{"$ref": ..., "description": ...}` for a described
+    # nested-model field; strict mode rejects a `$ref` with any sibling keyword.
+    raw = _Verdict.model_json_schema()
+    assert _refs_with_siblings(raw) == ["/properties/confidence"]
+    strict = _to_strict_schema(raw)
+    assert _refs_with_siblings(strict) == []
+    confidence = strict["properties"]["confidence"]
+    assert confidence["description"] == "How confident, with a reason."
+    assert confidence["additionalProperties"] is False
+    assert set(confidence["required"]) == {"level", "reason"}
+
+
+class _Tree(BaseModel):
+    name: str
+    parent: Optional["_Tree"] = None
+    first: Optional["_Tree"] = Field(default=None, description="The first child.")
+    only: "_Tree | None" = None
+    best: "_Leaf" = Field(description="Best leaf.")
+
+
+class _Leaf(BaseModel):
+    tree: Optional[_Tree] = None
+    owner: _Tree = Field(description="Owning tree.")
+
+
+def test_strict_schema_inlining_terminates_on_recursive_described_refs():
+    strict = _to_strict_schema(_Tree.model_json_schema())
+    assert _refs_with_siblings(strict) == []
+
+
 def test_complete_json_schema_sends_strict_schema_to_codex(fake_bin, tmp_path):
     # Capture the schema file codex actually receives, and prove the nullable
     # round-trip: codex emits null for the now-required optionals, and the

@@ -106,7 +106,7 @@ def run_codex_exec(
             if _QUOTA_PATTERNS.search(blob):
                 raise QuotaError(f"codex subscription limit: {blob[:200]}")
             raise ClientError(
-                f"codex exec failed (exit {proc.returncode}): {blob[:200]}"
+                f"codex exec failed (exit {proc.returncode}): {_failure_text(blob)}"
             )
 
         if collect_images:
@@ -128,6 +128,15 @@ def run_codex_exec(
             shutil.rmtree(scratch_home, ignore_errors=True)
         if work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _failure_text(blob: str, limit: int = 400) -> str:
+    """The last `ERROR:` line codex printed, else the tail of its output.
+
+    codex prints a session banner first, so the head of stderr never names the fault.
+    """
+    errors = [line for line in blob.splitlines() if line.startswith("ERROR:")]
+    return (errors[-1] if errors else blob[-limit:])[:limit]
 
 
 def _isolated_codex_home(source: str | None = None) -> str:

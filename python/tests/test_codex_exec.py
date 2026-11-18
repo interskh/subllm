@@ -67,6 +67,20 @@ exit 1
         run_codex_exec("x", codex_home=str(tmp_path))
 
 
+def test_failure_message_names_the_error_line_after_the_banner(fake_bin, tmp_path):
+    # codex prints a ~300-char banner before the real error; a message cut from
+    # the head of stderr names only the banner.
+    fake_bin("codex", r'''#!/bin/bash
+echo "Reading additional input from stdin..." >&2
+for i in $(seq 1 20); do echo "banner line $i padding padding padding" >&2; done
+echo 'ERROR: {"error":{"message":"Invalid schema for response_format"}}' >&2
+exit 1
+''')
+    with pytest.raises(ClientError) as info:
+        run_codex_exec("x", codex_home=str(tmp_path))
+    assert "Invalid schema for response_format" in str(info.value)
+
+
 def test_quota_message_maps_to_quota_error(fake_bin, tmp_path):
     fake_bin("codex", r'''#!/bin/bash
 echo "You have hit your usage limit. Try again later." >&2
